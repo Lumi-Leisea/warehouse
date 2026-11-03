@@ -1,4 +1,4 @@
-// Lumi/Extensions/warehouse/src/types.ts
+// src/types.ts
 var DEFAULT_PREFERENCES = {
   exportFormat: "charx",
   organizeByFolder: true,
@@ -9,7 +9,7 @@ var DEFAULT_PREFERENCES = {
   restoreFolders: true
 };
 
-// Lumi/Extensions/warehouse/src/zip.ts
+// src/zip.ts
 var CRC_TABLE = new Uint32Array(256);
 for (let n = 0;n < 256; n++) {
   let c = n;
@@ -471,7 +471,7 @@ function sanitizeFilenameComponent(input, fallback = "character") {
   return cleaned || fallback;
 }
 
-// Lumi/Extensions/warehouse/src/frontend.ts
+// src/frontend.ts
 var WAREHOUSE_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
   <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/>
   <path d="m3.3 7 8.7 5 8.7-5"/>
@@ -1000,6 +1000,89 @@ function setup(ctx) {
   function sendToBackend(msg) {
     ctx.sendToBackend(msg);
   }
+  function showToast(message, variant = "info") {
+    sendToBackend({ type: "notify", message, variant });
+  }
+  function el(tag, opts, children) {
+    const element = ctx.dom.createElement(tag);
+    if (opts) {
+      if (opts.className) {
+        element.className = opts.className;
+      }
+      if (opts.text !== undefined) {
+        element.textContent = opts.text;
+      }
+      if (opts.style) {
+        for (const [k, v] of Object.entries(opts.style)) {
+          element.style[k] = v;
+        }
+      }
+      if (opts.attrs) {
+        for (const [k, v] of Object.entries(opts.attrs)) {
+          element.setAttribute(k, v);
+        }
+      }
+      if (opts.on) {
+        for (const [eventName, handler] of Object.entries(opts.on)) {
+          element.addEventListener(eventName, handler);
+        }
+      }
+    }
+    if (children) {
+      for (const child of children) {
+        if (child) {
+          element.appendChild(child);
+        }
+      }
+    }
+    return element;
+  }
+  function encodeBase64Utf8(str) {
+    const bytes = new TextEncoder().encode(str);
+    let binary = "";
+    for (let i = 0;i < bytes.length; i += 1) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+  async function uploadStagedBlobToHost(blob, fileName, signal) {
+    const metadataPairs = [
+      `extension ${encodeBase64Utf8(ctx.extensionName || "warehouse")}`,
+      `filename ${encodeBase64Utf8(fileName)}`,
+      `filetype ${encodeBase64Utf8(blob.type || "application/octet-stream")}`
+    ];
+    const createRes = await fetch("/api/v1/spindle-uploads", {
+      method: "POST",
+      headers: {
+        "Tus-Resumable": "1.0.0",
+        "Upload-Length": String(blob.size),
+        "Upload-Metadata": metadataPairs.join(",")
+      },
+      signal
+    });
+    if (!createRes.ok) {
+      throw new Error(`Failed to create host staging upload (HTTP ${createRes.status})`);
+    }
+    const location = createRes.headers.get("Location") || "";
+    const uploadId = location.split("/").filter(Boolean).pop() || "";
+    if (!uploadId) {
+      throw new Error("Missing upload ID from host staging endpoint");
+    }
+    const patchRes = await fetch(`/api/v1/spindle-uploads/${encodeURIComponent(uploadId)}`, {
+      method: "PATCH",
+      headers: {
+        "Tus-Resumable": "1.0.0",
+        "Upload-Offset": "0",
+        "Content-Type": "application/offset+octet-stream"
+      },
+      body: blob,
+      signal
+    });
+    if (!patchRes.ok) {
+      throw new Error(`Failed to write staged upload bytes (HTTP ${patchRes.status})`);
+    }
+    return { uploadId };
+  }
   function updatePreferences(patch) {
     preferences = { ...preferences, ...patch };
     sendToBackend({ type: "save_preferences", preferences: patch });
@@ -1016,7 +1099,7 @@ function setup(ctx) {
       renderProgressOnly();
     }
   });
-  ctx.onDispose(unsubCharxProgress);
+  ctx.onTeardown(unsubCharxProgress);
   const tab = ctx.ui.registerDrawerTab({
     id: "warehouse",
     title: "Warehouse — Batch Character Export & Import",
@@ -1039,7 +1122,7 @@ function setup(ctx) {
     iconSvg: WAREHOUSE_ICON_SVG,
     defaultOpen: false
   });
-  const root = ctx.dom.el("div", { className: "wh-root" });
+  const root = el("div", { className: "wh-root" });
   tab.root.appendChild(root);
   let progressLabelEl = null;
   let progressSubLabelEl = null;
@@ -1167,9 +1250,7 @@ function setup(ctx) {
       return;
     }
     if (lastExportArtifact.fileId) {
-      await ctx.files.download(lastExportArtifact.fileId, {
-        filename: lastExportArtifact.fileName
-      });
+      await ctx.files.download(lastExportArtifact.fileId);
     }
   }
   function buildArchiveTimestamp() {
@@ -1195,7 +1276,7 @@ function setup(ctx) {
       return;
     const selectedChars = characters.filter((c) => selectedCharIds.has(c.id));
     if (selectedChars.length === 0) {
-      ctx.ui.toast("Select at least one character to export.", "warning");
+      showToast("Select at least one character to export.", "warning");
       return;
     }
     if (lastExportArtifact?.fileId) {
@@ -1258,10 +1339,8 @@ function setup(ctx) {
           renderProgressOnly();
           const baseFileName = entryPath.split("/").pop() || `${char.id}.${format}`;
           const mimeType = format === "json" ? "application/json" : format === "png" ? "image/png" : "application/zip";
-          const fileObj = new File([cardBytes], baseFileName, { type: mimeType });
-          const uploaded = await ctx.uploads.uploadFile(fileObj, {
-            signal: exportAbortController.signal
-          });
+          const fileBlob = new Blob([cardBytes], { type: mimeType });
+          const uploaded = await uploadStagedBlobToHost(fileBlob, baseFileName, exportAbortController.signal);
           stagedUploadEntries.push({
             name: entryPath,
             uploadId: uploaded.uploadId,
@@ -1337,7 +1416,7 @@ function setup(ctx) {
       exportSubStatusText = "Starting download...";
       renderProgressOnly();
       await downloadLastExportArtifact();
-      ctx.ui.toast(`Exported ${manifestEntries.length} character${manifestEntries.length === 1 ? "" : "s"} to ${archiveFileName}`, "success");
+      showToast(`Exported ${manifestEntries.length} character${manifestEntries.length === 1 ? "" : "s"} to ${archiveFileName}`, "success");
     } catch (err) {
       if (stagedUploadEntries.length > 0) {
         sendToBackend({
@@ -1347,9 +1426,9 @@ function setup(ctx) {
       }
       const message = err instanceof Error ? err.message : String(err);
       if (exportCancelRequested || message.toLowerCase().includes("abort")) {
-        ctx.ui.toast("Batch export cancelled.", "info");
+        showToast("Batch export cancelled.", "info");
       } else {
-        ctx.ui.toast(`Export failed: ${message}`, "error");
+        showToast(`Export failed: ${message}`, "error");
       }
     } finally {
       activeExportTrackingId = null;
@@ -1393,7 +1472,7 @@ function setup(ctx) {
       return;
     const chosenCandidates = inspectedZip.entries.filter((c) => selectedZipEntryPaths.has(c.archivePath));
     if (chosenCandidates.length === 0) {
-      ctx.ui.toast("Select at least one character from the archive to import.", "warning");
+      showToast("Select at least one character from the archive to import.", "warning");
       return;
     }
     isImporting = true;
@@ -1531,11 +1610,11 @@ function setup(ctx) {
         items: logItems
       };
       importProgressPct = 100;
-      ctx.ui.toast(`Import complete: ${importResultsSummary.imported} imported, ${importResultsSummary.skipped} skipped, ${importResultsSummary.failed} failed.`, importResultsSummary.failed > 0 ? "warning" : "success");
+      showToast(`Import complete: ${importResultsSummary.imported} imported, ${importResultsSummary.skipped} skipped, ${importResultsSummary.failed} failed.`, importResultsSummary.failed > 0 ? "warning" : "success");
       loadCharacterLibrary().catch(() => {});
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      ctx.ui.toast(`Import failed: ${msg}`, "error");
+      showToast(`Import failed: ${msg}`, "error");
     } finally {
       activeImportJobId = null;
       isImporting = false;
@@ -1556,15 +1635,15 @@ function setup(ctx) {
       return;
     charListContainerEl.innerHTML = "";
     if (isLoadingLibrary) {
-      charListContainerEl.appendChild(ctx.dom.el("div", { className: "wh-empty", text: "Loading character library..." }));
+      charListContainerEl.appendChild(el("div", { className: "wh-empty", text: "Loading character library..." }));
       return;
     }
     if (libraryError) {
-      charListContainerEl.appendChild(ctx.dom.el("div", { className: "wh-empty wh-status-err", text: libraryError }));
+      charListContainerEl.appendChild(el("div", { className: "wh-empty wh-status-err", text: libraryError }));
       return;
     }
     if (filtered.length === 0) {
-      charListContainerEl.appendChild(ctx.dom.el("div", {
+      charListContainerEl.appendChild(el("div", {
         className: "wh-empty",
         text: characters.length === 0 ? "No characters found in your Lumiverse library." : "No characters match your current search or filter."
       }));
@@ -1572,14 +1651,14 @@ function setup(ctx) {
     }
     for (const char of filtered) {
       const isSelected = selectedCharIds.has(char.id);
-      const row = ctx.dom.el("div", {
+      const row = el("div", {
         className: `wh-char-item${isSelected ? " is-selected" : ""}`
       });
-      const checkbox = ctx.dom.el("input", {
+      const checkbox = el("input", {
         attrs: { type: "checkbox" }
       });
       checkbox.checked = isSelected;
-      const avatar = ctx.dom.el("img", {
+      const avatar = el("img", {
         className: "wh-char-avatar",
         attrs: {
           src: `/api/v1/characters/${encodeURIComponent(char.id)}/avatar?size=sm`,
@@ -1593,9 +1672,9 @@ function setup(ctx) {
       if (Array.isArray(char.tags) && char.tags.length > 0) {
         subParts.push(char.tags.slice(0, 3).join(", "));
       }
-      const info = ctx.dom.el("div", { className: "wh-char-info" }, [
-        ctx.dom.el("div", { className: "wh-char-name", text: char.name || "Unnamed" }),
-        ctx.dom.el("div", {
+      const info = el("div", { className: "wh-char-info" }, [
+        el("div", { className: "wh-char-name", text: char.name || "Unnamed" }),
+        el("div", {
           className: "wh-char-sub",
           text: subParts.join(" • ") || "No creator/tags"
         })
@@ -1604,7 +1683,7 @@ function setup(ctx) {
       row.appendChild(avatar);
       row.appendChild(info);
       if (char.folder && char.folder.trim()) {
-        row.appendChild(ctx.dom.el("span", {
+        row.appendChild(el("span", {
           className: "wh-badge is-folder",
           text: char.folder.trim()
         }));
@@ -1641,13 +1720,13 @@ function setup(ctx) {
     }
   }
   function renderExportView() {
-    const container = ctx.dom.el("div", {
+    const container = el("div", {
       style: { display: "flex", flexDirection: "column", gap: "12px" }
     });
-    const formatPanel = ctx.dom.el("div", { className: "wh-panel" });
-    formatPanel.appendChild(ctx.dom.el("div", { className: "wh-panel-header" }, [
-      ctx.dom.el("span", { className: "wh-panel-title", text: "1. Export Format & Archive Options" }),
-      ctx.dom.el("span", { className: "wh-panel-subtitle", text: "Bundled as .zip" })
+    const formatPanel = el("div", { className: "wh-panel" });
+    formatPanel.appendChild(el("div", { className: "wh-panel-header" }, [
+      el("span", { className: "wh-panel-title", text: "1. Export Format & Archive Options" }),
+      el("span", { className: "wh-panel-subtitle", text: "Bundled as .zip" })
     ]));
     const formats = [
       {
@@ -1669,9 +1748,9 @@ function setup(ctx) {
         desc: "Lightweight CCSv3 JSON character definition & character_book"
       }
     ];
-    const formatGrid = ctx.dom.el("div", { className: "wh-format-grid" });
+    const formatGrid = el("div", { className: "wh-format-grid" });
     for (const fmt of formats) {
-      const card = ctx.dom.el("button", {
+      const card = el("button", {
         className: `wh-format-card${preferences.exportFormat === fmt.id ? " is-selected" : ""}`,
         attrs: { type: "button" },
         on: {
@@ -1683,26 +1762,26 @@ function setup(ctx) {
           }
         }
       }, [
-        ctx.dom.el("div", { className: "wh-format-card-top" }, [
-          ctx.dom.el("span", { className: "wh-format-name", text: fmt.title }),
-          ctx.dom.el("span", { className: "wh-format-ext", text: fmt.ext })
+        el("div", { className: "wh-format-card-top" }, [
+          el("span", { className: "wh-format-name", text: fmt.title }),
+          el("span", { className: "wh-format-ext", text: fmt.ext })
         ]),
-        ctx.dom.el("span", { className: "wh-format-desc", text: fmt.desc })
+        el("span", { className: "wh-format-desc", text: fmt.desc })
       ]);
       formatGrid.appendChild(card);
     }
     formatPanel.appendChild(formatGrid);
-    const optionsList = ctx.dom.el("div", { className: "wh-options-list" });
+    const optionsList = el("div", { className: "wh-options-list" });
     const createOptionRow = (checked, title, hint, onChange) => {
-      const cb = ctx.dom.el("input", { attrs: { type: "checkbox" } });
+      const cb = el("input", { attrs: { type: "checkbox" } });
       cb.checked = checked;
       cb.disabled = isExporting;
       cb.addEventListener("change", () => onChange(cb.checked));
-      return ctx.dom.el("label", { className: "wh-checkbox-row" }, [
+      return el("label", { className: "wh-checkbox-row" }, [
         cb,
-        ctx.dom.el("div", { className: "wh-checkbox-meta" }, [
-          ctx.dom.el("span", { text: title }),
-          ctx.dom.el("span", { className: "wh-checkbox-hint", text: hint })
+        el("div", { className: "wh-checkbox-meta" }, [
+          el("span", { text: title }),
+          el("span", { className: "wh-checkbox-hint", text: hint })
         ])
       ]);
     };
@@ -1713,17 +1792,17 @@ function setup(ctx) {
     }
     formatPanel.appendChild(optionsList);
     container.appendChild(formatPanel);
-    const selectPanel = ctx.dom.el("div", { className: "wh-panel" });
-    selectionSummaryEl = ctx.dom.el("span", {
+    const selectPanel = el("div", { className: "wh-panel" });
+    selectionSummaryEl = el("span", {
       className: "wh-panel-subtitle",
       text: `${selectedCharIds.size} of ${characters.length} selected`
     });
-    selectPanel.appendChild(ctx.dom.el("div", { className: "wh-panel-header" }, [
-      ctx.dom.el("span", { className: "wh-panel-title", text: "2. Select Characters" }),
+    selectPanel.appendChild(el("div", { className: "wh-panel-header" }, [
+      el("span", { className: "wh-panel-title", text: "2. Select Characters" }),
       selectionSummaryEl
     ]));
-    const filterBar = ctx.dom.el("div", { className: "wh-filter-bar" });
-    const searchInput = ctx.dom.el("input", {
+    const filterBar = el("div", { className: "wh-filter-bar" });
+    const searchInput = el("input", {
       className: "wh-input",
       attrs: {
         type: "search",
@@ -1736,22 +1815,22 @@ function setup(ctx) {
       updateCharacterListSelectionUI();
     });
     filterBar.appendChild(searchInput);
-    const filterRow = ctx.dom.el("div", { className: "wh-filter-row" });
-    const folderSelect = ctx.dom.el("select", { className: "wh-select" });
-    folderSelect.appendChild(ctx.dom.el("option", { attrs: { value: "__ALL__" }, text: "All Folders" }));
-    folderSelect.appendChild(ctx.dom.el("option", { attrs: { value: "__UNFILED__" }, text: "Unfiled (No Folder)" }));
+    const filterRow = el("div", { className: "wh-filter-row" });
+    const folderSelect = el("select", { className: "wh-select" });
+    folderSelect.appendChild(el("option", { attrs: { value: "__ALL__" }, text: "All Folders" }));
+    folderSelect.appendChild(el("option", { attrs: { value: "__UNFILED__" }, text: "Unfiled (No Folder)" }));
     for (const f of getFoldersList()) {
-      folderSelect.appendChild(ctx.dom.el("option", { attrs: { value: f }, text: `Folder: ${f}` }));
+      folderSelect.appendChild(el("option", { attrs: { value: f }, text: `Folder: ${f}` }));
     }
     folderSelect.value = folderFilter;
     folderSelect.addEventListener("change", () => {
       folderFilter = folderSelect.value;
       updateCharacterListSelectionUI();
     });
-    const tagSelect = ctx.dom.el("select", { className: "wh-select" });
-    tagSelect.appendChild(ctx.dom.el("option", { attrs: { value: "__ALL__" }, text: "All Tags" }));
+    const tagSelect = el("select", { className: "wh-select" });
+    tagSelect.appendChild(el("option", { attrs: { value: "__ALL__" }, text: "All Tags" }));
     for (const t of availableTags) {
-      tagSelect.appendChild(ctx.dom.el("option", { attrs: { value: t }, text: `Tag: ${t}` }));
+      tagSelect.appendChild(el("option", { attrs: { value: t }, text: `Tag: ${t}` }));
     }
     tagSelect.value = tagFilter;
     tagSelect.addEventListener("change", () => {
@@ -1762,9 +1841,9 @@ function setup(ctx) {
     filterRow.appendChild(tagSelect);
     filterBar.appendChild(filterRow);
     selectPanel.appendChild(filterBar);
-    const toolbar = ctx.dom.el("div", { className: "wh-toolbar" });
-    const leftGroup = ctx.dom.el("div", { className: "wh-toolbar-group" }, [
-      ctx.dom.el("button", {
+    const toolbar = el("div", { className: "wh-toolbar" });
+    const leftGroup = el("div", { className: "wh-toolbar-group" }, [
+      el("button", {
         className: "wh-mini-btn",
         text: "Select Shown",
         attrs: { type: "button" },
@@ -1776,7 +1855,7 @@ function setup(ctx) {
           }
         }
       }),
-      ctx.dom.el("button", {
+      el("button", {
         className: "wh-mini-btn",
         text: "Select All",
         attrs: { type: "button" },
@@ -1788,7 +1867,7 @@ function setup(ctx) {
           }
         }
       }),
-      ctx.dom.el("button", {
+      el("button", {
         className: "wh-mini-btn",
         text: "Invert Shown",
         attrs: { type: "button" },
@@ -1804,7 +1883,7 @@ function setup(ctx) {
           }
         }
       }),
-      ctx.dom.el("button", {
+      el("button", {
         className: "wh-mini-btn",
         text: "Clear",
         attrs: { type: "button" },
@@ -1816,7 +1895,7 @@ function setup(ctx) {
         }
       })
     ]);
-    const refreshBtn = ctx.dom.el("button", {
+    const refreshBtn = el("button", {
       className: "wh-mini-btn",
       text: isLoadingLibrary ? "Refreshing..." : "Refresh List",
       attrs: { type: "button" },
@@ -1830,28 +1909,28 @@ function setup(ctx) {
     toolbar.appendChild(leftGroup);
     toolbar.appendChild(refreshBtn);
     selectPanel.appendChild(toolbar);
-    charListContainerEl = ctx.dom.el("div", { className: "wh-char-list" });
+    charListContainerEl = el("div", { className: "wh-char-list" });
     selectPanel.appendChild(charListContainerEl);
     container.appendChild(selectPanel);
-    const actionPanel = ctx.dom.el("div", { className: "wh-panel" });
+    const actionPanel = el("div", { className: "wh-panel" });
     if (isExporting) {
-      progressLabelEl = ctx.dom.el("div", {
+      progressLabelEl = el("div", {
         className: "wh-panel-title",
         text: exportStatusText || "Exporting..."
       });
-      progressPctEl = ctx.dom.el("span", { text: `${Math.round(exportProgressPct)}%` });
-      progressSubLabelEl = ctx.dom.el("span", { text: exportSubStatusText });
-      progressFillEl = ctx.dom.el("div", {
+      progressPctEl = el("span", { text: `${Math.round(exportProgressPct)}%` });
+      progressSubLabelEl = el("span", { text: exportSubStatusText });
+      progressFillEl = el("div", {
         className: "wh-progress-fill",
         style: { width: `${exportProgressPct}%` }
       });
-      const progressBox = ctx.dom.el("div", { className: "wh-progress-box" }, [
-        ctx.dom.el("div", { className: "wh-panel-header" }, [progressLabelEl, progressPctEl]),
-        ctx.dom.el("div", { className: "wh-progress-track" }, [progressFillEl]),
-        ctx.dom.el("div", { className: "wh-progress-meta" }, [progressSubLabelEl])
+      const progressBox = el("div", { className: "wh-progress-box" }, [
+        el("div", { className: "wh-panel-header" }, [progressLabelEl, progressPctEl]),
+        el("div", { className: "wh-progress-track" }, [progressFillEl]),
+        el("div", { className: "wh-progress-meta" }, [progressSubLabelEl])
       ]);
       actionPanel.appendChild(progressBox);
-      const cancelBtn = ctx.dom.el("button", {
+      const cancelBtn = el("button", {
         className: "wh-secondary-btn wh-danger-btn",
         text: "Cancel Export",
         attrs: { type: "button" },
@@ -1864,7 +1943,7 @@ function setup(ctx) {
       });
       actionPanel.appendChild(cancelBtn);
     } else {
-      exportButtonEl = ctx.dom.el("button", {
+      exportButtonEl = el("button", {
         className: "wh-primary-btn",
         text: `Export ${selectedCharIds.size} Character${selectedCharIds.size === 1 ? "" : "s"} as .ZIP (${preferences.exportFormat.toUpperCase()})`,
         attrs: { type: "button" },
@@ -1877,22 +1956,22 @@ function setup(ctx) {
       exportButtonEl.disabled = selectedCharIds.size === 0;
       actionPanel.appendChild(exportButtonEl);
       if (lastExportArtifact) {
-        const readyRow = ctx.dom.el("div", {
+        const readyRow = el("div", {
           className: "wh-progress-box",
           style: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }
         }, [
-          ctx.dom.el("div", { style: { display: "flex", flexDirection: "column", gap: "2px" } }, [
-            ctx.dom.el("span", {
+          el("div", { style: { display: "flex", flexDirection: "column", gap: "2px" } }, [
+            el("span", {
               className: "wh-status-ok",
               style: { fontWeight: "600", fontSize: "12px" },
               text: `Ready: ${lastExportArtifact.fileName}`
             }),
-            ctx.dom.el("span", {
+            el("span", {
               className: "wh-panel-subtitle",
               text: `${lastExportArtifact.count} character${lastExportArtifact.count === 1 ? "" : "s"} • ${formatByteSize(lastExportArtifact.size)}`
             })
           ]),
-          ctx.dom.el("button", {
+          el("button", {
             className: "wh-secondary-btn",
             text: "Download Again",
             attrs: { type: "button" },
@@ -1911,18 +1990,18 @@ function setup(ctx) {
     return container;
   }
   function renderImportView() {
-    const container = ctx.dom.el("div", {
+    const container = el("div", {
       style: { display: "flex", flexDirection: "column", gap: "12px" }
     });
-    const pickerPanel = ctx.dom.el("div", { className: "wh-panel" });
-    pickerPanel.appendChild(ctx.dom.el("div", { className: "wh-panel-header" }, [
-      ctx.dom.el("span", { className: "wh-panel-title", text: "1. Select Character .ZIP Archive" }),
-      ctx.dom.el("span", {
+    const pickerPanel = el("div", { className: "wh-panel" });
+    pickerPanel.appendChild(el("div", { className: "wh-panel-header" }, [
+      el("span", { className: "wh-panel-title", text: "1. Select Character .ZIP Archive" }),
+      el("span", {
         className: "wh-panel-subtitle",
         text: "Supports .charx, .png, and .json inside .zip"
       })
     ]));
-    const fileInput = ctx.dom.el("input", {
+    const fileInput = el("input", {
       attrs: {
         type: "file",
         accept: ".zip,application/zip"
@@ -1935,7 +2014,7 @@ function setup(ctx) {
         handleZipFileSelected(file);
       }
     });
-    const dropzone = ctx.dom.el("div", {
+    const dropzone = el("div", {
       className: "wh-dropzone",
       on: {
         click: () => {
@@ -1962,11 +2041,11 @@ function setup(ctx) {
         }
       }
     }, [
-      ctx.dom.el("div", {
+      el("div", {
         style: { fontWeight: "600", fontSize: "13px" },
         text: selectedZipFile ? `${selectedZipFile.name} (${formatByteSize(selectedZipFile.size)})` : "Click or drag & drop a .zip archive here"
       }),
-      ctx.dom.el("div", {
+      el("div", {
         className: "wh-panel-subtitle",
         text: inspectedZip ? `Found ${inspectedZip.entries.length} character card${inspectedZip.entries.length === 1 ? "" : "s"}${inspectedZip.manifest ? " • Warehouse Manifest detected" : ""}` : "Reads ZIP & ZIP64 archives directly without loading the entire file into RAM"
       })
@@ -1974,33 +2053,33 @@ function setup(ctx) {
     pickerPanel.appendChild(fileInput);
     pickerPanel.appendChild(dropzone);
     if (isInspectingZip) {
-      pickerPanel.appendChild(ctx.dom.el("div", { className: "wh-empty", text: "Inspecting ZIP central directory..." }));
+      pickerPanel.appendChild(el("div", { className: "wh-empty", text: "Inspecting ZIP central directory..." }));
     } else if (zipInspectError) {
-      pickerPanel.appendChild(ctx.dom.el("div", { className: "wh-empty wh-status-err", text: zipInspectError }));
+      pickerPanel.appendChild(el("div", { className: "wh-empty wh-status-err", text: zipInspectError }));
     }
     container.appendChild(pickerPanel);
     if (inspectedZip && inspectedZip.entries.length > 0) {
-      const contentsPanel = ctx.dom.el("div", { className: "wh-panel" });
-      const countSummaryEl = ctx.dom.el("span", {
+      const contentsPanel = el("div", { className: "wh-panel" });
+      const countSummaryEl = el("span", {
         className: "wh-panel-subtitle",
         text: `${selectedZipEntryPaths.size} of ${inspectedZip.entries.length} selected`
       });
-      contentsPanel.appendChild(ctx.dom.el("div", { className: "wh-panel-header" }, [
-        ctx.dom.el("span", { className: "wh-panel-title", text: "2. Archive Contents & Options" }),
+      contentsPanel.appendChild(el("div", { className: "wh-panel-header" }, [
+        el("span", { className: "wh-panel-title", text: "2. Archive Contents & Options" }),
         countSummaryEl
       ]));
-      const optionsList = ctx.dom.el("div", { className: "wh-options-list" });
-      const skipDupCb = ctx.dom.el("input", { attrs: { type: "checkbox" } });
+      const optionsList = el("div", { className: "wh-options-list" });
+      const skipDupCb = el("input", { attrs: { type: "checkbox" } });
       skipDupCb.checked = preferences.skipDuplicates;
       skipDupCb.disabled = isImporting;
       skipDupCb.addEventListener("change", () => {
         updatePreferences({ skipDuplicates: skipDupCb.checked });
       });
-      optionsList.appendChild(ctx.dom.el("label", { className: "wh-checkbox-row" }, [
+      optionsList.appendChild(el("label", { className: "wh-checkbox-row" }, [
         skipDupCb,
-        ctx.dom.el("div", { className: "wh-checkbox-meta" }, [
-          ctx.dom.el("span", { text: "Skip duplicate characters" }),
-          ctx.dom.el("span", {
+        el("div", { className: "wh-checkbox-meta" }, [
+          el("span", { text: "Skip duplicate characters" }),
+          el("span", {
             className: "wh-checkbox-hint",
             text: "Skips characters whose name already exists in your library"
           })
@@ -2008,7 +2087,7 @@ function setup(ctx) {
       ]));
       const hasAnyFolders = inspectedZip.entries.some((c) => Boolean(c.folder));
       if (hasAnyFolders) {
-        const restoreFoldersCb = ctx.dom.el("input", {
+        const restoreFoldersCb = el("input", {
           attrs: { type: "checkbox" }
         });
         restoreFoldersCb.checked = preferences.restoreFolders;
@@ -2016,11 +2095,11 @@ function setup(ctx) {
         restoreFoldersCb.addEventListener("change", () => {
           updatePreferences({ restoreFolders: restoreFoldersCb.checked });
         });
-        optionsList.appendChild(ctx.dom.el("label", { className: "wh-checkbox-row" }, [
+        optionsList.appendChild(el("label", { className: "wh-checkbox-row" }, [
           restoreFoldersCb,
-          ctx.dom.el("div", { className: "wh-checkbox-meta" }, [
-            ctx.dom.el("span", { text: "Restore character folder assignments" }),
-            ctx.dom.el("span", {
+          el("div", { className: "wh-checkbox-meta" }, [
+            el("span", { text: "Restore character folder assignments" }),
+            el("span", {
               className: "wh-checkbox-hint",
               text: "Assigns imported characters to their folder from the manifest or ZIP subfolder"
             })
@@ -2028,9 +2107,9 @@ function setup(ctx) {
         ]));
       }
       contentsPanel.appendChild(optionsList);
-      const toolbar = ctx.dom.el("div", { className: "wh-toolbar" }, [
-        ctx.dom.el("div", { className: "wh-toolbar-group" }, [
-          ctx.dom.el("button", {
+      const toolbar = el("div", { className: "wh-toolbar" }, [
+        el("div", { className: "wh-toolbar-group" }, [
+          el("button", {
             className: "wh-mini-btn",
             text: "Select All",
             attrs: { type: "button" },
@@ -2045,7 +2124,7 @@ function setup(ctx) {
               }
             }
           }),
-          ctx.dom.el("button", {
+          el("button", {
             className: "wh-mini-btn",
             text: "Clear",
             attrs: { type: "button" },
@@ -2061,18 +2140,18 @@ function setup(ctx) {
         ])
       ]);
       contentsPanel.appendChild(toolbar);
-      const listEl = ctx.dom.el("div", { className: "wh-char-list" });
+      const listEl = el("div", { className: "wh-char-list" });
       for (const candidate of inspectedZip.entries) {
         const isChecked = selectedZipEntryPaths.has(candidate.archivePath);
-        const itemRow = ctx.dom.el("div", {
+        const itemRow = el("div", {
           className: `wh-char-item${isChecked ? " is-selected" : ""}`
         });
-        const cb = ctx.dom.el("input", { attrs: { type: "checkbox" } });
+        const cb = el("input", { attrs: { type: "checkbox" } });
         cb.checked = isChecked;
         cb.disabled = isImporting;
-        const info = ctx.dom.el("div", { className: "wh-char-info" }, [
-          ctx.dom.el("div", { className: "wh-char-name", text: candidate.baseName }),
-          ctx.dom.el("div", {
+        const info = el("div", { className: "wh-char-info" }, [
+          el("div", { className: "wh-char-name", text: candidate.baseName }),
+          el("div", {
             className: "wh-char-sub",
             text: `${candidate.archivePath} • ${formatByteSize(candidate.uncompressedSize)}`
           })
@@ -2080,12 +2159,12 @@ function setup(ctx) {
         itemRow.appendChild(cb);
         itemRow.appendChild(info);
         if (candidate.folder) {
-          itemRow.appendChild(ctx.dom.el("span", {
+          itemRow.appendChild(el("span", {
             className: "wh-badge is-folder",
             text: candidate.folder
           }));
         }
-        itemRow.appendChild(ctx.dom.el("span", {
+        itemRow.appendChild(el("span", {
           className: "wh-badge is-format",
           text: candidate.format
         }));
@@ -2111,22 +2190,22 @@ function setup(ctx) {
       }
       contentsPanel.appendChild(listEl);
       if (isImporting) {
-        progressLabelEl = ctx.dom.el("div", {
+        progressLabelEl = el("div", {
           className: "wh-panel-title",
           text: importStatusText || "Importing..."
         });
-        progressPctEl = ctx.dom.el("span", { text: `${Math.round(importProgressPct)}%` });
-        progressSubLabelEl = ctx.dom.el("span", { text: importSubStatusText });
-        progressFillEl = ctx.dom.el("div", {
+        progressPctEl = el("span", { text: `${Math.round(importProgressPct)}%` });
+        progressSubLabelEl = el("span", { text: importSubStatusText });
+        progressFillEl = el("div", {
           className: "wh-progress-fill",
           style: { width: `${importProgressPct}%` }
         });
-        contentsPanel.appendChild(ctx.dom.el("div", { className: "wh-progress-box" }, [
-          ctx.dom.el("div", { className: "wh-panel-header" }, [progressLabelEl, progressPctEl]),
-          ctx.dom.el("div", { className: "wh-progress-track" }, [progressFillEl]),
-          ctx.dom.el("div", { className: "wh-progress-meta" }, [progressSubLabelEl])
+        contentsPanel.appendChild(el("div", { className: "wh-progress-box" }, [
+          el("div", { className: "wh-panel-header" }, [progressLabelEl, progressPctEl]),
+          el("div", { className: "wh-progress-track" }, [progressFillEl]),
+          el("div", { className: "wh-progress-meta" }, [progressSubLabelEl])
         ]));
-        contentsPanel.appendChild(ctx.dom.el("button", {
+        contentsPanel.appendChild(el("button", {
           className: "wh-secondary-btn wh-danger-btn",
           text: "Cancel Import",
           attrs: { type: "button" },
@@ -2140,7 +2219,7 @@ function setup(ctx) {
           }
         }));
       } else {
-        const importBtn = ctx.dom.el("button", {
+        const importBtn = el("button", {
           className: "wh-primary-btn",
           text: `Import ${selectedZipEntryPaths.size} Character${selectedZipEntryPaths.size === 1 ? "" : "s"} into Lumiverse`,
           attrs: { type: "button" },
@@ -2156,24 +2235,24 @@ function setup(ctx) {
       container.appendChild(contentsPanel);
     }
     if (importResultsSummary) {
-      const summaryPanel = ctx.dom.el("div", { className: "wh-panel" });
-      summaryPanel.appendChild(ctx.dom.el("div", { className: "wh-panel-header" }, [
-        ctx.dom.el("span", { className: "wh-panel-title", text: "Import Summary" }),
-        ctx.dom.el("span", {
+      const summaryPanel = el("div", { className: "wh-panel" });
+      summaryPanel.appendChild(el("div", { className: "wh-panel-header" }, [
+        el("span", { className: "wh-panel-title", text: "Import Summary" }),
+        el("span", {
           className: "wh-panel-subtitle",
           text: `${importResultsSummary.imported} imported • ${importResultsSummary.skipped} skipped • ${importResultsSummary.failed} failed${importResultsSummary.foldersRestored > 0 ? ` • ${importResultsSummary.foldersRestored} folders restored` : ""}`
         })
       ]));
       if (importResultsSummary.items.length > 0) {
-        const logList = ctx.dom.el("div", { className: "wh-log-list" });
+        const logList = el("div", { className: "wh-log-list" });
         for (const item of importResultsSummary.items) {
           const statusClass = item.status === "imported" ? "wh-status-ok" : item.status === "skipped" ? "wh-status-skip" : "wh-status-err";
-          logList.appendChild(ctx.dom.el("div", { className: "wh-log-item" }, [
-            ctx.dom.el("span", {
+          logList.appendChild(el("div", { className: "wh-log-item" }, [
+            el("span", {
               style: { fontWeight: "500", overflow: "hidden", textOverflow: "ellipsis" },
               text: item.name
             }),
-            ctx.dom.el("span", {
+            el("span", {
               className: statusClass,
               text: item.detail || item.status
             })
@@ -2194,8 +2273,8 @@ function setup(ctx) {
     selectionSummaryEl = null;
     exportButtonEl = null;
     root.innerHTML = "";
-    const modeBar = ctx.dom.el("div", { className: "wh-mode-bar" }, [
-      ctx.dom.el("button", {
+    const modeBar = el("div", { className: "wh-mode-bar" }, [
+      el("button", {
         className: `wh-mode-btn${activeMode === "export" ? " is-active" : ""}`,
         text: "Batch Export (.ZIP)",
         attrs: { type: "button" },
@@ -2208,7 +2287,7 @@ function setup(ctx) {
           }
         }
       }),
-      ctx.dom.el("button", {
+      el("button", {
         className: `wh-mode-btn${activeMode === "import" ? " is-active" : ""}`,
         text: "Batch Import (.ZIP)",
         attrs: { type: "button" },
@@ -2241,7 +2320,7 @@ function setup(ctx) {
       }
       case "open_tab": {
         activeMode = msg.mode === "import" ? "import" : "export";
-        tab.open();
+        tab.activate();
         render();
         break;
       }

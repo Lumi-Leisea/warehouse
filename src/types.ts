@@ -111,6 +111,11 @@ export type FrontendToBackendMessage =
   | {
       type: 'cleanup_archive';
       fileId: string;
+    }
+  | {
+      type: 'notify';
+      message: string;
+      variant?: 'success' | 'warning' | 'error' | 'info';
     };
 
 export type BackendToFrontendMessage =

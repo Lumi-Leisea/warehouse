@@ -4,12 +4,6 @@
 
 **Warehouse** is a Spindle extension for Lumiverse that lets you batch export any selection of characters in all available single-character export formats (`CHARX`, `PNG`, and `JSON`), package them into a `.zip` archive (with full ZIP64 support), and re-import those `.zip` archives later with folder assignments intact.
 
-- **Author:** Eleisea
-- **Identifier:** `warehouse`
-- **Version:** `1.0.0`
-- **Repository:** [https://github.com/Lumi-Leisea/warehouse](https://github.com/Lumi-Leisea/warehouse)
-- **License:** [Lumiverse Community License v2.2](./LICENSE.md)
-
 ---
 
 ## Features
@@ -68,32 +62,3 @@ bun install
 bun run build
 ```
 
----
-
-## Project Layout
-
-```text
-warehouse/
-├── dist/
-│   ├── backend.js       # Prebuilt Spindle backend bundle (Bun target)
-│   └── frontend.js      # Prebuilt Spindle frontend bundle (Browser target)
-├── src/
-│   ├── backend.ts       # Spindle backend entrypoint (storage, commands, host archive staging)
-│   ├── frontend.ts      # Spindle frontend entrypoint (Drawer Tab UI, export/import workflows)
-│   ├── types.ts         # Shared TypeScript interfaces & message protocol
-│   └── zip.ts           # Streaming ZIP/ZIP64 builder & random-access Central Directory reader
-├── CHANGELOG.md
-├── LICENSE.md           # Lumiverse Community License (Version 2.2)
-├── README.md
-├── package.json
-├── spindle.json         # Lumiverse Spindle extension manifest
-└── tsconfig.json
-```
-
----
-
-## License
-
-This extension is licensed under the [Lumiverse Community License (Version 2.2)](./LICENSE.md).
-
-> Warehouse is an independent community extension created by **Eleisea** for interoperability with Lumiverse and is not an official offering endorsed or supported by the Lumiverse organization.

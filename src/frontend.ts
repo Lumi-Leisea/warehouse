@@ -580,6 +580,113 @@ export function setup(ctx: SpindleFrontendContext): void {
     ctx.sendToBackend(msg);
   }
 
+  function showToast(
+    message: string,
+    variant: 'success' | 'warning' | 'error' | 'info' = 'info'
+  ): void {
+    sendToBackend({ type: 'notify', message, variant });
+  }
+
+  interface DomElementOptions {
+    className?: string;
+    text?: string;
+    style?: Record<string, string>;
+    attrs?: Record<string, string>;
+    on?: Record<string, (e: Event) => void>;
+  }
+
+  function el<K extends keyof HTMLElementTagNameMap>(
+    tag: K,
+    opts?: DomElementOptions,
+    children?: Array<Node | null | undefined>
+  ): HTMLElementTagNameMap[K] {
+    const element = ctx.dom.createElement(tag);
+    if (opts) {
+      if (opts.className) {
+        element.className = opts.className;
+      }
+      if (opts.text !== undefined) {
+        element.textContent = opts.text;
+      }
+      if (opts.style) {
+        for (const [k, v] of Object.entries(opts.style)) {
+          (element.style as unknown as Record<string, string>)[k] = v;
+        }
+      }
+      if (opts.attrs) {
+        for (const [k, v] of Object.entries(opts.attrs)) {
+          element.setAttribute(k, v);
+        }
+      }
+      if (opts.on) {
+        for (const [eventName, handler] of Object.entries(opts.on)) {
+          element.addEventListener(eventName, handler);
+        }
+      }
+    }
+    if (children) {
+      for (const child of children) {
+        if (child) {
+          element.appendChild(child);
+        }
+      }
+    }
+    return element;
+  }
+
+  function encodeBase64Utf8(str: string): string {
+    const bytes = new TextEncoder().encode(str);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 1) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+
+  async function uploadStagedBlobToHost(
+    blob: Blob,
+    fileName: string,
+    signal: AbortSignal
+  ): Promise<{ uploadId: string }> {
+    const metadataPairs = [
+      `extension ${encodeBase64Utf8(ctx.extensionName || 'warehouse')}`,
+      `filename ${encodeBase64Utf8(fileName)}`,
+      `filetype ${encodeBase64Utf8(blob.type || 'application/octet-stream')}`,
+    ];
+    const createRes = await fetch('/api/v1/spindle-uploads', {
+      method: 'POST',
+      headers: {
+        'Tus-Resumable': '1.0.0',
+        'Upload-Length': String(blob.size),
+        'Upload-Metadata': metadataPairs.join(','),
+      },
+      signal,
+    });
+    if (!createRes.ok) {
+      throw new Error(`Failed to create host staging upload (HTTP ${createRes.status})`);
+    }
+    const location = createRes.headers.get('Location') || '';
+    const uploadId = location.split('/').filter(Boolean).pop() || '';
+    if (!uploadId) {
+      throw new Error('Missing upload ID from host staging endpoint');
+    }
+
+    const patchRes = await fetch(`/api/v1/spindle-uploads/${encodeURIComponent(uploadId)}`, {
+      method: 'PATCH',
+      headers: {
+        'Tus-Resumable': '1.0.0',
+        'Upload-Offset': '0',
+        'Content-Type': 'application/offset+octet-stream',
+      },
+      body: blob,
+      signal,
+    });
+    if (!patchRes.ok) {
+      throw new Error(`Failed to write staged upload bytes (HTTP ${patchRes.status})`);
+    }
+    return { uploadId };
+  }
+
   function updatePreferences(patch: Partial<WarehousePreferences>): void {
     preferences = { ...preferences, ...patch };
     sendToBackend({ type: 'save_preferences', preferences: patch });
@@ -605,7 +712,7 @@ export function setup(ctx: SpindleFrontendContext): void {
       renderProgressOnly();
     }
   });
-  ctx.onDispose(unsubCharxProgress);
+  ctx.onTeardown(unsubCharxProgress);
 
   const tab = ctx.ui.registerDrawerTab({
     id: 'warehouse',
@@ -631,7 +738,7 @@ export function setup(ctx: SpindleFrontendContext): void {
     defaultOpen: false,
   });
 
-  const root = ctx.dom.el('div', { className: 'wh-root' });
+  const root = el('div', { className: 'wh-root' });
   tab.root.appendChild(root);
 
   // Dynamic progress elements for lightweight updates during loops
@@ -774,9 +881,7 @@ export function setup(ctx: SpindleFrontendContext): void {
       return;
     }
     if (lastExportArtifact.fileId) {
-      await ctx.files.download(lastExportArtifact.fileId, {
-        filename: lastExportArtifact.fileName,
-      });
+      await ctx.files.download(lastExportArtifact.fileId);
     }
   }
 
@@ -814,7 +919,7 @@ export function setup(ctx: SpindleFrontendContext): void {
     if (isExporting) return;
     const selectedChars = characters.filter((c) => selectedCharIds.has(c.id));
     if (selectedChars.length === 0) {
-      ctx.ui.toast('Select at least one character to export.', 'warning');
+      showToast('Select at least one character to export.', 'warning');
       return;
     }
 
@@ -909,10 +1014,12 @@ export function setup(ctx: SpindleFrontendContext): void {
               : format === 'png'
                 ? 'image/png'
                 : 'application/zip';
-          const fileObj = new File([cardBytes], baseFileName, { type: mimeType });
-          const uploaded = await ctx.uploads.uploadFile(fileObj, {
-            signal: exportAbortController.signal,
-          });
+          const fileBlob = new Blob([cardBytes], { type: mimeType });
+          const uploaded = await uploadStagedBlobToHost(
+            fileBlob,
+            baseFileName,
+            exportAbortController.signal
+          );
           stagedUploadEntries.push({
             name: entryPath,
             uploadId: uploaded.uploadId,
@@ -1005,7 +1112,7 @@ export function setup(ctx: SpindleFrontendContext): void {
       renderProgressOnly();
 
       await downloadLastExportArtifact();
-      ctx.ui.toast(
+      showToast(
         `Exported ${manifestEntries.length} character${
           manifestEntries.length === 1 ? '' : 's'
         } to ${archiveFileName}`,
@@ -1020,9 +1127,9 @@ export function setup(ctx: SpindleFrontendContext): void {
       }
       const message = err instanceof Error ? err.message : String(err);
       if (exportCancelRequested || message.toLowerCase().includes('abort')) {
-        ctx.ui.toast('Batch export cancelled.', 'info');
+        showToast('Batch export cancelled.', 'info');
       } else {
-        ctx.ui.toast(`Export failed: ${message}`, 'error');
+        showToast(`Export failed: ${message}`, 'error');
       }
     } finally {
       activeExportTrackingId = null;
@@ -1075,7 +1182,7 @@ export function setup(ctx: SpindleFrontendContext): void {
       selectedZipEntryPaths.has(c.archivePath)
     );
     if (chosenCandidates.length === 0) {
-      ctx.ui.toast('Select at least one character from the archive to import.', 'warning');
+      showToast('Select at least one character from the archive to import.', 'warning');
       return;
     }
 
@@ -1274,7 +1381,7 @@ export function setup(ctx: SpindleFrontendContext): void {
       };
 
       importProgressPct = 100;
-      ctx.ui.toast(
+      showToast(
         `Import complete: ${importResultsSummary.imported} imported, ${importResultsSummary.skipped} skipped, ${importResultsSummary.failed} failed.`,
         importResultsSummary.failed > 0 ? 'warning' : 'success'
       );
@@ -1283,7 +1390,7 @@ export function setup(ctx: SpindleFrontendContext): void {
       loadCharacterLibrary().catch(() => {});
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      ctx.ui.toast(`Import failed: ${msg}`, 'error');
+      showToast(`Import failed: ${msg}`, 'error');
     } finally {
       activeImportJobId = null;
       isImporting = false;
@@ -1310,21 +1417,21 @@ export function setup(ctx: SpindleFrontendContext): void {
     charListContainerEl.innerHTML = '';
     if (isLoadingLibrary) {
       charListContainerEl.appendChild(
-        ctx.dom.el('div', { className: 'wh-empty', text: 'Loading character library...' })
+        el('div', { className: 'wh-empty', text: 'Loading character library...' })
       );
       return;
     }
 
     if (libraryError) {
       charListContainerEl.appendChild(
-        ctx.dom.el('div', { className: 'wh-empty wh-status-err', text: libraryError })
+        el('div', { className: 'wh-empty wh-status-err', text: libraryError })
       );
       return;
     }
 
     if (filtered.length === 0) {
       charListContainerEl.appendChild(
-        ctx.dom.el('div', {
+        el('div', {
           className: 'wh-empty',
           text:
             characters.length === 0
@@ -1337,16 +1444,16 @@ export function setup(ctx: SpindleFrontendContext): void {
 
     for (const char of filtered) {
       const isSelected = selectedCharIds.has(char.id);
-      const row = ctx.dom.el('div', {
+      const row = el('div', {
         className: `wh-char-item${isSelected ? ' is-selected' : ''}`,
       });
 
-      const checkbox = ctx.dom.el('input', {
+      const checkbox = el('input', {
         attrs: { type: 'checkbox' },
       }) as HTMLInputElement;
       checkbox.checked = isSelected;
 
-      const avatar = ctx.dom.el('img', {
+      const avatar = el('img', {
         className: 'wh-char-avatar',
         attrs: {
           src: `/api/v1/characters/${encodeURIComponent(char.id)}/avatar?size=sm`,
@@ -1361,9 +1468,9 @@ export function setup(ctx: SpindleFrontendContext): void {
         subParts.push(char.tags.slice(0, 3).join(', '));
       }
 
-      const info = ctx.dom.el('div', { className: 'wh-char-info' }, [
-        ctx.dom.el('div', { className: 'wh-char-name', text: char.name || 'Unnamed' }),
-        ctx.dom.el('div', {
+      const info = el('div', { className: 'wh-char-info' }, [
+        el('div', { className: 'wh-char-name', text: char.name || 'Unnamed' }),
+        el('div', {
           className: 'wh-char-sub',
           text: subParts.join(' • ') || 'No creator/tags',
         }),
@@ -1375,7 +1482,7 @@ export function setup(ctx: SpindleFrontendContext): void {
 
       if (char.folder && char.folder.trim()) {
         row.appendChild(
-          ctx.dom.el('span', {
+          el('span', {
             className: 'wh-badge is-folder',
             text: char.folder.trim(),
           })
@@ -1417,16 +1524,16 @@ export function setup(ctx: SpindleFrontendContext): void {
   }
 
   function renderExportView(): HTMLElement {
-    const container = ctx.dom.el('div', {
+    const container = el('div', {
       style: { display: 'flex', flexDirection: 'column', gap: '12px' },
     });
 
     // 1. Format & Packaging Options Panel
-    const formatPanel = ctx.dom.el('div', { className: 'wh-panel' });
+    const formatPanel = el('div', { className: 'wh-panel' });
     formatPanel.appendChild(
-      ctx.dom.el('div', { className: 'wh-panel-header' }, [
-        ctx.dom.el('span', { className: 'wh-panel-title', text: '1. Export Format & Archive Options' }),
-        ctx.dom.el('span', { className: 'wh-panel-subtitle', text: 'Bundled as .zip' }),
+      el('div', { className: 'wh-panel-header' }, [
+        el('span', { className: 'wh-panel-title', text: '1. Export Format & Archive Options' }),
+        el('span', { className: 'wh-panel-subtitle', text: 'Bundled as .zip' }),
       ])
     );
 
@@ -1456,9 +1563,9 @@ export function setup(ctx: SpindleFrontendContext): void {
       },
     ];
 
-    const formatGrid = ctx.dom.el('div', { className: 'wh-format-grid' });
+    const formatGrid = el('div', { className: 'wh-format-grid' });
     for (const fmt of formats) {
-      const card = ctx.dom.el(
+      const card = el(
         'button',
         {
           className: `wh-format-card${preferences.exportFormat === fmt.id ? ' is-selected' : ''}`,
@@ -1472,18 +1579,18 @@ export function setup(ctx: SpindleFrontendContext): void {
           },
         },
         [
-          ctx.dom.el('div', { className: 'wh-format-card-top' }, [
-            ctx.dom.el('span', { className: 'wh-format-name', text: fmt.title }),
-            ctx.dom.el('span', { className: 'wh-format-ext', text: fmt.ext }),
+          el('div', { className: 'wh-format-card-top' }, [
+            el('span', { className: 'wh-format-name', text: fmt.title }),
+            el('span', { className: 'wh-format-ext', text: fmt.ext }),
           ]),
-          ctx.dom.el('span', { className: 'wh-format-desc', text: fmt.desc }),
+          el('span', { className: 'wh-format-desc', text: fmt.desc }),
         ]
       );
       formatGrid.appendChild(card);
     }
     formatPanel.appendChild(formatGrid);
 
-    const optionsList = ctx.dom.el('div', { className: 'wh-options-list' });
+    const optionsList = el('div', { className: 'wh-options-list' });
 
     const createOptionRow = (
       checked: boolean,
@@ -1491,16 +1598,16 @@ export function setup(ctx: SpindleFrontendContext): void {
       hint: string,
       onChange: (val: boolean) => void
     ) => {
-      const cb = ctx.dom.el('input', { attrs: { type: 'checkbox' } }) as HTMLInputElement;
+      const cb = el('input', { attrs: { type: 'checkbox' } }) as HTMLInputElement;
       cb.checked = checked;
       cb.disabled = isExporting;
       cb.addEventListener('change', () => onChange(cb.checked));
 
-      return ctx.dom.el('label', { className: 'wh-checkbox-row' }, [
+      return el('label', { className: 'wh-checkbox-row' }, [
         cb,
-        ctx.dom.el('div', { className: 'wh-checkbox-meta' }, [
-          ctx.dom.el('span', { text: title }),
-          ctx.dom.el('span', { className: 'wh-checkbox-hint', text: hint }),
+        el('div', { className: 'wh-checkbox-meta' }, [
+          el('span', { text: title }),
+          el('span', { className: 'wh-checkbox-hint', text: hint }),
         ]),
       ]);
     };
@@ -1538,21 +1645,21 @@ export function setup(ctx: SpindleFrontendContext): void {
     container.appendChild(formatPanel);
 
     // 2. Character Selection Panel
-    const selectPanel = ctx.dom.el('div', { className: 'wh-panel' });
-    selectionSummaryEl = ctx.dom.el('span', {
+    const selectPanel = el('div', { className: 'wh-panel' });
+    selectionSummaryEl = el('span', {
       className: 'wh-panel-subtitle',
       text: `${selectedCharIds.size} of ${characters.length} selected`,
     });
 
     selectPanel.appendChild(
-      ctx.dom.el('div', { className: 'wh-panel-header' }, [
-        ctx.dom.el('span', { className: 'wh-panel-title', text: '2. Select Characters' }),
+      el('div', { className: 'wh-panel-header' }, [
+        el('span', { className: 'wh-panel-title', text: '2. Select Characters' }),
         selectionSummaryEl,
       ])
     );
 
-    const filterBar = ctx.dom.el('div', { className: 'wh-filter-bar' });
-    const searchInput = ctx.dom.el('input', {
+    const filterBar = el('div', { className: 'wh-filter-bar' });
+    const searchInput = el('input', {
       className: 'wh-input',
       attrs: {
         type: 'search',
@@ -1566,15 +1673,15 @@ export function setup(ctx: SpindleFrontendContext): void {
     });
     filterBar.appendChild(searchInput);
 
-    const filterRow = ctx.dom.el('div', { className: 'wh-filter-row' });
+    const filterRow = el('div', { className: 'wh-filter-row' });
 
-    const folderSelect = ctx.dom.el('select', { className: 'wh-select' }) as HTMLSelectElement;
-    folderSelect.appendChild(ctx.dom.el('option', { attrs: { value: '__ALL__' }, text: 'All Folders' }));
+    const folderSelect = el('select', { className: 'wh-select' }) as HTMLSelectElement;
+    folderSelect.appendChild(el('option', { attrs: { value: '__ALL__' }, text: 'All Folders' }));
     folderSelect.appendChild(
-      ctx.dom.el('option', { attrs: { value: '__UNFILED__' }, text: 'Unfiled (No Folder)' })
+      el('option', { attrs: { value: '__UNFILED__' }, text: 'Unfiled (No Folder)' })
     );
     for (const f of getFoldersList()) {
-      folderSelect.appendChild(ctx.dom.el('option', { attrs: { value: f }, text: `Folder: ${f}` }));
+      folderSelect.appendChild(el('option', { attrs: { value: f }, text: `Folder: ${f}` }));
     }
     folderSelect.value = folderFilter;
     folderSelect.addEventListener('change', () => {
@@ -1582,10 +1689,10 @@ export function setup(ctx: SpindleFrontendContext): void {
       updateCharacterListSelectionUI();
     });
 
-    const tagSelect = ctx.dom.el('select', { className: 'wh-select' }) as HTMLSelectElement;
-    tagSelect.appendChild(ctx.dom.el('option', { attrs: { value: '__ALL__' }, text: 'All Tags' }));
+    const tagSelect = el('select', { className: 'wh-select' }) as HTMLSelectElement;
+    tagSelect.appendChild(el('option', { attrs: { value: '__ALL__' }, text: 'All Tags' }));
     for (const t of availableTags) {
-      tagSelect.appendChild(ctx.dom.el('option', { attrs: { value: t }, text: `Tag: ${t}` }));
+      tagSelect.appendChild(el('option', { attrs: { value: t }, text: `Tag: ${t}` }));
     }
     tagSelect.value = tagFilter;
     tagSelect.addEventListener('change', () => {
@@ -1599,9 +1706,9 @@ export function setup(ctx: SpindleFrontendContext): void {
     selectPanel.appendChild(filterBar);
 
     // Quick selection toolbar
-    const toolbar = ctx.dom.el('div', { className: 'wh-toolbar' });
-    const leftGroup = ctx.dom.el('div', { className: 'wh-toolbar-group' }, [
-      ctx.dom.el('button', {
+    const toolbar = el('div', { className: 'wh-toolbar' });
+    const leftGroup = el('div', { className: 'wh-toolbar-group' }, [
+      el('button', {
         className: 'wh-mini-btn',
         text: 'Select Shown',
         attrs: { type: 'button' },
@@ -1612,7 +1719,7 @@ export function setup(ctx: SpindleFrontendContext): void {
           },
         },
       }),
-      ctx.dom.el('button', {
+      el('button', {
         className: 'wh-mini-btn',
         text: 'Select All',
         attrs: { type: 'button' },
@@ -1623,7 +1730,7 @@ export function setup(ctx: SpindleFrontendContext): void {
           },
         },
       }),
-      ctx.dom.el('button', {
+      el('button', {
         className: 'wh-mini-btn',
         text: 'Invert Shown',
         attrs: { type: 'button' },
@@ -1637,7 +1744,7 @@ export function setup(ctx: SpindleFrontendContext): void {
           },
         },
       }),
-      ctx.dom.el('button', {
+      el('button', {
         className: 'wh-mini-btn',
         text: 'Clear',
         attrs: { type: 'button' },
@@ -1650,7 +1757,7 @@ export function setup(ctx: SpindleFrontendContext): void {
       }),
     ]);
 
-    const refreshBtn = ctx.dom.el('button', {
+    const refreshBtn = el('button', {
       className: 'wh-mini-btn',
       text: isLoadingLibrary ? 'Refreshing...' : 'Refresh List',
       attrs: { type: 'button' },
@@ -1666,33 +1773,33 @@ export function setup(ctx: SpindleFrontendContext): void {
     toolbar.appendChild(refreshBtn);
     selectPanel.appendChild(toolbar);
 
-    charListContainerEl = ctx.dom.el('div', { className: 'wh-char-list' });
+    charListContainerEl = el('div', { className: 'wh-char-list' });
     selectPanel.appendChild(charListContainerEl);
     container.appendChild(selectPanel);
 
     // 3. Export Action & Live Progress
-    const actionPanel = ctx.dom.el('div', { className: 'wh-panel' });
+    const actionPanel = el('div', { className: 'wh-panel' });
 
     if (isExporting) {
-      progressLabelEl = ctx.dom.el('div', {
+      progressLabelEl = el('div', {
         className: 'wh-panel-title',
         text: exportStatusText || 'Exporting...',
       });
-      progressPctEl = ctx.dom.el('span', { text: `${Math.round(exportProgressPct)}%` });
-      progressSubLabelEl = ctx.dom.el('span', { text: exportSubStatusText });
-      progressFillEl = ctx.dom.el('div', {
+      progressPctEl = el('span', { text: `${Math.round(exportProgressPct)}%` });
+      progressSubLabelEl = el('span', { text: exportSubStatusText });
+      progressFillEl = el('div', {
         className: 'wh-progress-fill',
         style: { width: `${exportProgressPct}%` },
       });
 
-      const progressBox = ctx.dom.el('div', { className: 'wh-progress-box' }, [
-        ctx.dom.el('div', { className: 'wh-panel-header' }, [progressLabelEl, progressPctEl]),
-        ctx.dom.el('div', { className: 'wh-progress-track' }, [progressFillEl]),
-        ctx.dom.el('div', { className: 'wh-progress-meta' }, [progressSubLabelEl]),
+      const progressBox = el('div', { className: 'wh-progress-box' }, [
+        el('div', { className: 'wh-panel-header' }, [progressLabelEl, progressPctEl]),
+        el('div', { className: 'wh-progress-track' }, [progressFillEl]),
+        el('div', { className: 'wh-progress-meta' }, [progressSubLabelEl]),
       ]);
       actionPanel.appendChild(progressBox);
 
-      const cancelBtn = ctx.dom.el('button', {
+      const cancelBtn = el('button', {
         className: 'wh-secondary-btn wh-danger-btn',
         text: 'Cancel Export',
         attrs: { type: 'button' },
@@ -1705,7 +1812,7 @@ export function setup(ctx: SpindleFrontendContext): void {
       });
       actionPanel.appendChild(cancelBtn);
     } else {
-      exportButtonEl = ctx.dom.el('button', {
+      exportButtonEl = el('button', {
         className: 'wh-primary-btn',
         text: `Export ${selectedCharIds.size} Character${
           selectedCharIds.size === 1 ? '' : 's'
@@ -1721,27 +1828,27 @@ export function setup(ctx: SpindleFrontendContext): void {
       actionPanel.appendChild(exportButtonEl);
 
       if (lastExportArtifact) {
-        const readyRow = ctx.dom.el(
+        const readyRow = el(
           'div',
           {
             className: 'wh-progress-box',
             style: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
           },
           [
-            ctx.dom.el('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, [
-              ctx.dom.el('span', {
+            el('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, [
+              el('span', {
                 className: 'wh-status-ok',
                 style: { fontWeight: '600', fontSize: '12px' },
                 text: `Ready: ${lastExportArtifact.fileName}`,
               }),
-              ctx.dom.el('span', {
+              el('span', {
                 className: 'wh-panel-subtitle',
                 text: `${lastExportArtifact.count} character${
                   lastExportArtifact.count === 1 ? '' : 's'
                 } • ${formatByteSize(lastExportArtifact.size)}`,
               }),
             ]),
-            ctx.dom.el('button', {
+            el('button', {
               className: 'wh-secondary-btn',
               text: 'Download Again',
               attrs: { type: 'button' },
@@ -1763,23 +1870,23 @@ export function setup(ctx: SpindleFrontendContext): void {
   }
 
   function renderImportView(): HTMLElement {
-    const container = ctx.dom.el('div', {
+    const container = el('div', {
       style: { display: 'flex', flexDirection: 'column', gap: '12px' },
     });
 
     // 1. Archive Dropzone / Picker
-    const pickerPanel = ctx.dom.el('div', { className: 'wh-panel' });
+    const pickerPanel = el('div', { className: 'wh-panel' });
     pickerPanel.appendChild(
-      ctx.dom.el('div', { className: 'wh-panel-header' }, [
-        ctx.dom.el('span', { className: 'wh-panel-title', text: '1. Select Character .ZIP Archive' }),
-        ctx.dom.el('span', {
+      el('div', { className: 'wh-panel-header' }, [
+        el('span', { className: 'wh-panel-title', text: '1. Select Character .ZIP Archive' }),
+        el('span', {
           className: 'wh-panel-subtitle',
           text: 'Supports .charx, .png, and .json inside .zip',
         }),
       ])
     );
 
-    const fileInput = ctx.dom.el('input', {
+    const fileInput = el('input', {
       attrs: {
         type: 'file',
         accept: '.zip,application/zip',
@@ -1794,7 +1901,7 @@ export function setup(ctx: SpindleFrontendContext): void {
       }
     });
 
-    const dropzone = ctx.dom.el(
+    const dropzone = el(
       'div',
       {
         className: 'wh-dropzone',
@@ -1822,13 +1929,13 @@ export function setup(ctx: SpindleFrontendContext): void {
         },
       },
       [
-        ctx.dom.el('div', {
+        el('div', {
           style: { fontWeight: '600', fontSize: '13px' },
           text: selectedZipFile
             ? `${selectedZipFile.name} (${formatByteSize(selectedZipFile.size)})`
             : 'Click or drag & drop a .zip archive here',
         }),
-        ctx.dom.el('div', {
+        el('div', {
           className: 'wh-panel-subtitle',
           text: inspectedZip
             ? `Found ${inspectedZip.entries.length} character card${
@@ -1844,11 +1951,11 @@ export function setup(ctx: SpindleFrontendContext): void {
 
     if (isInspectingZip) {
       pickerPanel.appendChild(
-        ctx.dom.el('div', { className: 'wh-empty', text: 'Inspecting ZIP central directory...' })
+        el('div', { className: 'wh-empty', text: 'Inspecting ZIP central directory...' })
       );
     } else if (zipInspectError) {
       pickerPanel.appendChild(
-        ctx.dom.el('div', { className: 'wh-empty wh-status-err', text: zipInspectError })
+        el('div', { className: 'wh-empty wh-status-err', text: zipInspectError })
       );
     }
 
@@ -1856,23 +1963,23 @@ export function setup(ctx: SpindleFrontendContext): void {
 
     // 2. Archive Contents & Import Options
     if (inspectedZip && inspectedZip.entries.length > 0) {
-      const contentsPanel = ctx.dom.el('div', { className: 'wh-panel' });
-      const countSummaryEl = ctx.dom.el('span', {
+      const contentsPanel = el('div', { className: 'wh-panel' });
+      const countSummaryEl = el('span', {
         className: 'wh-panel-subtitle',
         text: `${selectedZipEntryPaths.size} of ${inspectedZip.entries.length} selected`,
       });
 
       contentsPanel.appendChild(
-        ctx.dom.el('div', { className: 'wh-panel-header' }, [
-          ctx.dom.el('span', { className: 'wh-panel-title', text: '2. Archive Contents & Options' }),
+        el('div', { className: 'wh-panel-header' }, [
+          el('span', { className: 'wh-panel-title', text: '2. Archive Contents & Options' }),
           countSummaryEl,
         ])
       );
 
       // Options checkboxes
-      const optionsList = ctx.dom.el('div', { className: 'wh-options-list' });
+      const optionsList = el('div', { className: 'wh-options-list' });
 
-      const skipDupCb = ctx.dom.el('input', { attrs: { type: 'checkbox' } }) as HTMLInputElement;
+      const skipDupCb = el('input', { attrs: { type: 'checkbox' } }) as HTMLInputElement;
       skipDupCb.checked = preferences.skipDuplicates;
       skipDupCb.disabled = isImporting;
       skipDupCb.addEventListener('change', () => {
@@ -1880,11 +1987,11 @@ export function setup(ctx: SpindleFrontendContext): void {
       });
 
       optionsList.appendChild(
-        ctx.dom.el('label', { className: 'wh-checkbox-row' }, [
+        el('label', { className: 'wh-checkbox-row' }, [
           skipDupCb,
-          ctx.dom.el('div', { className: 'wh-checkbox-meta' }, [
-            ctx.dom.el('span', { text: 'Skip duplicate characters' }),
-            ctx.dom.el('span', {
+          el('div', { className: 'wh-checkbox-meta' }, [
+            el('span', { text: 'Skip duplicate characters' }),
+            el('span', {
               className: 'wh-checkbox-hint',
               text: 'Skips characters whose name already exists in your library',
             }),
@@ -1894,7 +2001,7 @@ export function setup(ctx: SpindleFrontendContext): void {
 
       const hasAnyFolders = inspectedZip.entries.some((c) => Boolean(c.folder));
       if (hasAnyFolders) {
-        const restoreFoldersCb = ctx.dom.el('input', {
+        const restoreFoldersCb = el('input', {
           attrs: { type: 'checkbox' },
         }) as HTMLInputElement;
         restoreFoldersCb.checked = preferences.restoreFolders;
@@ -1904,11 +2011,11 @@ export function setup(ctx: SpindleFrontendContext): void {
         });
 
         optionsList.appendChild(
-          ctx.dom.el('label', { className: 'wh-checkbox-row' }, [
+          el('label', { className: 'wh-checkbox-row' }, [
             restoreFoldersCb,
-            ctx.dom.el('div', { className: 'wh-checkbox-meta' }, [
-              ctx.dom.el('span', { text: 'Restore character folder assignments' }),
-              ctx.dom.el('span', {
+            el('div', { className: 'wh-checkbox-meta' }, [
+              el('span', { text: 'Restore character folder assignments' }),
+              el('span', {
                 className: 'wh-checkbox-hint',
                 text: 'Assigns imported characters to their folder from the manifest or ZIP subfolder',
               }),
@@ -1920,9 +2027,9 @@ export function setup(ctx: SpindleFrontendContext): void {
       contentsPanel.appendChild(optionsList);
 
       // Selection buttons
-      const toolbar = ctx.dom.el('div', { className: 'wh-toolbar' }, [
-        ctx.dom.el('div', { className: 'wh-toolbar-group' }, [
-          ctx.dom.el('button', {
+      const toolbar = el('div', { className: 'wh-toolbar' }, [
+        el('div', { className: 'wh-toolbar-group' }, [
+          el('button', {
             className: 'wh-mini-btn',
             text: 'Select All',
             attrs: { type: 'button' },
@@ -1936,7 +2043,7 @@ export function setup(ctx: SpindleFrontendContext): void {
               },
             },
           }),
-          ctx.dom.el('button', {
+          el('button', {
             className: 'wh-mini-btn',
             text: 'Clear',
             attrs: { type: 'button' },
@@ -1953,20 +2060,20 @@ export function setup(ctx: SpindleFrontendContext): void {
       contentsPanel.appendChild(toolbar);
 
       // Candidate list
-      const listEl = ctx.dom.el('div', { className: 'wh-char-list' });
+      const listEl = el('div', { className: 'wh-char-list' });
       for (const candidate of inspectedZip.entries) {
         const isChecked = selectedZipEntryPaths.has(candidate.archivePath);
-        const itemRow = ctx.dom.el('div', {
+        const itemRow = el('div', {
           className: `wh-char-item${isChecked ? ' is-selected' : ''}`,
         });
 
-        const cb = ctx.dom.el('input', { attrs: { type: 'checkbox' } }) as HTMLInputElement;
+        const cb = el('input', { attrs: { type: 'checkbox' } }) as HTMLInputElement;
         cb.checked = isChecked;
         cb.disabled = isImporting;
 
-        const info = ctx.dom.el('div', { className: 'wh-char-info' }, [
-          ctx.dom.el('div', { className: 'wh-char-name', text: candidate.baseName }),
-          ctx.dom.el('div', {
+        const info = el('div', { className: 'wh-char-info' }, [
+          el('div', { className: 'wh-char-name', text: candidate.baseName }),
+          el('div', {
             className: 'wh-char-sub',
             text: `${candidate.archivePath} • ${formatByteSize(candidate.uncompressedSize)}`,
           }),
@@ -1977,7 +2084,7 @@ export function setup(ctx: SpindleFrontendContext): void {
 
         if (candidate.folder) {
           itemRow.appendChild(
-            ctx.dom.el('span', {
+            el('span', {
               className: 'wh-badge is-folder',
               text: candidate.folder,
             })
@@ -1985,7 +2092,7 @@ export function setup(ctx: SpindleFrontendContext): void {
         }
 
         itemRow.appendChild(
-          ctx.dom.el('span', {
+          el('span', {
             className: 'wh-badge is-format',
             text: candidate.format,
           })
@@ -2016,27 +2123,27 @@ export function setup(ctx: SpindleFrontendContext): void {
 
       // Import action / progress
       if (isImporting) {
-        progressLabelEl = ctx.dom.el('div', {
+        progressLabelEl = el('div', {
           className: 'wh-panel-title',
           text: importStatusText || 'Importing...',
         });
-        progressPctEl = ctx.dom.el('span', { text: `${Math.round(importProgressPct)}%` });
-        progressSubLabelEl = ctx.dom.el('span', { text: importSubStatusText });
-        progressFillEl = ctx.dom.el('div', {
+        progressPctEl = el('span', { text: `${Math.round(importProgressPct)}%` });
+        progressSubLabelEl = el('span', { text: importSubStatusText });
+        progressFillEl = el('div', {
           className: 'wh-progress-fill',
           style: { width: `${importProgressPct}%` },
         });
 
         contentsPanel.appendChild(
-          ctx.dom.el('div', { className: 'wh-progress-box' }, [
-            ctx.dom.el('div', { className: 'wh-panel-header' }, [progressLabelEl, progressPctEl]),
-            ctx.dom.el('div', { className: 'wh-progress-track' }, [progressFillEl]),
-            ctx.dom.el('div', { className: 'wh-progress-meta' }, [progressSubLabelEl]),
+          el('div', { className: 'wh-progress-box' }, [
+            el('div', { className: 'wh-panel-header' }, [progressLabelEl, progressPctEl]),
+            el('div', { className: 'wh-progress-track' }, [progressFillEl]),
+            el('div', { className: 'wh-progress-meta' }, [progressSubLabelEl]),
           ])
         );
 
         contentsPanel.appendChild(
-          ctx.dom.el('button', {
+          el('button', {
             className: 'wh-secondary-btn wh-danger-btn',
             text: 'Cancel Import',
             attrs: { type: 'button' },
@@ -2054,7 +2161,7 @@ export function setup(ctx: SpindleFrontendContext): void {
           })
         );
       } else {
-        const importBtn = ctx.dom.el('button', {
+        const importBtn = el('button', {
           className: 'wh-primary-btn',
           text: `Import ${selectedZipEntryPaths.size} Character${
             selectedZipEntryPaths.size === 1 ? '' : 's'
@@ -2075,11 +2182,11 @@ export function setup(ctx: SpindleFrontendContext): void {
 
     // 3. Import Results Summary
     if (importResultsSummary) {
-      const summaryPanel = ctx.dom.el('div', { className: 'wh-panel' });
+      const summaryPanel = el('div', { className: 'wh-panel' });
       summaryPanel.appendChild(
-        ctx.dom.el('div', { className: 'wh-panel-header' }, [
-          ctx.dom.el('span', { className: 'wh-panel-title', text: 'Import Summary' }),
-          ctx.dom.el('span', {
+        el('div', { className: 'wh-panel-header' }, [
+          el('span', { className: 'wh-panel-title', text: 'Import Summary' }),
+          el('span', {
             className: 'wh-panel-subtitle',
             text: `${importResultsSummary.imported} imported • ${importResultsSummary.skipped} skipped • ${importResultsSummary.failed} failed${
               importResultsSummary.foldersRestored > 0
@@ -2091,7 +2198,7 @@ export function setup(ctx: SpindleFrontendContext): void {
       );
 
       if (importResultsSummary.items.length > 0) {
-        const logList = ctx.dom.el('div', { className: 'wh-log-list' });
+        const logList = el('div', { className: 'wh-log-list' });
         for (const item of importResultsSummary.items) {
           const statusClass =
             item.status === 'imported'
@@ -2100,12 +2207,12 @@ export function setup(ctx: SpindleFrontendContext): void {
                 ? 'wh-status-skip'
                 : 'wh-status-err';
           logList.appendChild(
-            ctx.dom.el('div', { className: 'wh-log-item' }, [
-              ctx.dom.el('span', {
+            el('div', { className: 'wh-log-item' }, [
+              el('span', {
                 style: { fontWeight: '500', overflow: 'hidden', textOverflow: 'ellipsis' },
                 text: item.name,
               }),
-              ctx.dom.el('span', {
+              el('span', {
                 className: statusClass,
                 text: item.detail || item.status,
               }),
@@ -2133,8 +2240,8 @@ export function setup(ctx: SpindleFrontendContext): void {
     root.innerHTML = '';
 
     // Mode Switcher Bar
-    const modeBar = ctx.dom.el('div', { className: 'wh-mode-bar' }, [
-      ctx.dom.el('button', {
+    const modeBar = el('div', { className: 'wh-mode-bar' }, [
+      el('button', {
         className: `wh-mode-btn${activeMode === 'export' ? ' is-active' : ''}`,
         text: 'Batch Export (.ZIP)',
         attrs: { type: 'button' },
@@ -2147,7 +2254,7 @@ export function setup(ctx: SpindleFrontendContext): void {
           },
         },
       }),
-      ctx.dom.el('button', {
+      el('button', {
         className: `wh-mode-btn${activeMode === 'import' ? ' is-active' : ''}`,
         text: 'Batch Import (.ZIP)',
         attrs: { type: 'button' },
@@ -2185,7 +2292,7 @@ export function setup(ctx: SpindleFrontendContext): void {
 
       case 'open_tab': {
         activeMode = msg.mode === 'import' ? 'import' : 'export';
-        tab.open();
+        tab.activate();
         render();
         break;
       }

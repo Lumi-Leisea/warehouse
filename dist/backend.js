@@ -1,5 +1,5 @@
 // @bun
-// Lumi/Extensions/warehouse/src/types.ts
+// src/types.ts
 var DEFAULT_PREFERENCES = {
   exportFormat: "charx",
   organizeByFolder: true,
@@ -10,7 +10,7 @@ var DEFAULT_PREFERENCES = {
   restoreFolders: true
 };
 
-// Lumi/Extensions/warehouse/src/backend.ts
+// src/backend.ts
 var PREFERENCES_KEY = "preferences.json";
 var MAX_CHUNK_BYTES = 512 * 1024;
 function isValidFormat(value) {
@@ -40,40 +40,46 @@ async function writeTextAsStagedFile(fileName, content, mimeType, userId) {
   const handle = await spindle.files.create({
     fileName,
     mimeType,
-    expectedSize: bytes.byteLength,
+    size: bytes.byteLength,
     userId
   });
   try {
     for (let offset = 0;offset < bytes.byteLength; offset += MAX_CHUNK_BYTES) {
       const slice = bytes.subarray(offset, Math.min(offset + MAX_CHUNK_BYTES, bytes.byteLength));
-      await spindle.files.writeChunk(handle.fileId, slice, { userId });
+      await spindle.files.writeChunk(handle.fileId, offset, slice, userId);
     }
-    await spindle.files.finish(handle.fileId, { userId });
+    await spindle.files.finish(handle.fileId, userId);
     return handle.fileId;
   } catch (err) {
     try {
-      await spindle.files.delete(handle.fileId, { userId });
+      await spindle.files.delete(handle.fileId, userId);
     } catch {}
     throw err;
   }
 }
-spindle.commands.register({
-  id: "open-export",
-  title: "Warehouse: Batch Export Characters",
-  description: "Open Warehouse to batch export characters into a ZIP archive (JSON, PNG, or CHARX)",
-  category: "Characters",
-  keywords: ["warehouse", "batch", "export", "zip", "charx", "png", "json", "characters", "backup"]
-}, (ctx) => {
-  sendToSession({ type: "open_tab", mode: "export" }, ctx.userId, ctx.frontendSessionId);
-});
-spindle.commands.register({
-  id: "open-import",
-  title: "Warehouse: Batch Import Character Archive",
-  description: "Open Warehouse to import characters from a Warehouse or character ZIP bundle",
-  category: "Characters",
-  keywords: ["warehouse", "batch", "import", "zip", "charx", "png", "json", "characters", "restore"]
-}, (ctx) => {
-  sendToSession({ type: "open_tab", mode: "import" }, ctx.userId, ctx.frontendSessionId);
+var WAREHOUSE_COMMANDS = [
+  {
+    id: "open-export",
+    label: "Warehouse: Batch Export Characters",
+    description: "Open Warehouse to batch export characters into a ZIP archive (JSON, PNG, or CHARX)",
+    keywords: ["warehouse", "batch", "export", "zip", "charx", "png", "json", "characters", "backup"],
+    scope: "global"
+  },
+  {
+    id: "open-import",
+    label: "Warehouse: Batch Import Character Archive",
+    description: "Open Warehouse to import characters from a Warehouse or character ZIP bundle",
+    keywords: ["warehouse", "batch", "import", "zip", "charx", "png", "json", "characters", "restore"],
+    scope: "global"
+  }
+];
+spindle.commands.register(WAREHOUSE_COMMANDS);
+spindle.commands.onInvoked((commandId, _context, origin) => {
+  if (commandId === "open-export") {
+    sendToSession({ type: "open_tab", mode: "export" }, origin?.userId, origin?.frontendSessionId);
+  } else if (commandId === "open-import") {
+    sendToSession({ type: "open_tab", mode: "import" }, origin?.userId, origin?.frontendSessionId);
+  }
 });
 spindle.onFrontendMessage(async (rawData, userId, frontendSessionId) => {
   if (!rawData || typeof rawData !== "object")
@@ -89,7 +95,8 @@ spindle.onFrontendMessage(async (rawData, userId, frontendSessionId) => {
         const preferences = sanitizePreferences(stored, DEFAULT_PREFERENCES);
         sendToSession({ type: "preferences_loaded", preferences }, userId, frontendSessionId);
       } catch (err) {
-        spindle.log.warn("Failed to load Warehouse preferences, using defaults:", err);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        spindle.log.warn(`Failed to load Warehouse preferences, using defaults: ${errMsg}`);
         sendToSession({ type: "preferences_loaded", preferences: { ...DEFAULT_PREFERENCES } }, userId, frontendSessionId);
       }
       break;
@@ -108,7 +115,8 @@ spindle.onFrontendMessage(async (rawData, userId, frontendSessionId) => {
         });
         sendToSession({ type: "preferences_loaded", preferences: merged }, userId, frontendSessionId);
       } catch (err) {
-        spindle.log.warn("Failed to save Warehouse preferences:", err);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        spindle.log.warn(`Failed to save Warehouse preferences: ${errMsg}`);
       }
       break;
     }
@@ -145,7 +153,7 @@ spindle.onFrontendMessage(async (rawData, userId, frontendSessionId) => {
         }, userId, frontendSessionId);
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : String(err);
-        spindle.log.error("Host-staged ZIP assembly failed:", errorMessage);
+        spindle.log.error(`Host-staged ZIP assembly failed: ${errorMessage}`);
         sendToSession({
           type: "archive_error",
           jobId,
@@ -154,12 +162,12 @@ spindle.onFrontendMessage(async (rawData, userId, frontendSessionId) => {
       } finally {
         if (manifestFileId) {
           try {
-            await spindle.files.delete(manifestFileId, { userId });
+            await spindle.files.delete(manifestFileId, userId);
           } catch {}
         }
         for (const item of entries || []) {
           try {
-            await spindle.uploads.delete(item.uploadId, { userId });
+            await spindle.uploads.delete(item.uploadId, userId);
           } catch {}
         }
       }
@@ -168,7 +176,7 @@ spindle.onFrontendMessage(async (rawData, userId, frontendSessionId) => {
     case "cleanup_uploads": {
       for (const uploadId of msg.uploadIds || []) {
         try {
-          await spindle.uploads.delete(uploadId, { userId });
+          await spindle.uploads.delete(uploadId, userId);
         } catch {}
       }
       break;
@@ -176,9 +184,24 @@ spindle.onFrontendMessage(async (rawData, userId, frontendSessionId) => {
     case "cleanup_archive": {
       if (msg.fileId) {
         try {
-          await spindle.files.delete(msg.fileId, { userId });
+          await spindle.files.delete(msg.fileId, userId);
         } catch {}
       }
+      break;
+    }
+    case "notify": {
+      const text = typeof msg.message === "string" ? msg.message.trim() : "";
+      if (!text)
+        break;
+      const variant = msg.variant || "info";
+      if (variant === "success")
+        spindle.toast.success(text, { title: "Warehouse", userId });
+      else if (variant === "warning")
+        spindle.toast.warning(text, { title: "Warehouse", userId });
+      else if (variant === "error")
+        spindle.toast.error(text, { title: "Warehouse", userId });
+      else
+        spindle.toast.info(text, { title: "Warehouse", userId });
       break;
     }
   }
