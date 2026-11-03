@@ -46,6 +46,10 @@ function sanitizePreferences(
       typeof raw.skipDuplicates === 'boolean' ? raw.skipDuplicates : fallback.skipDuplicates,
     restoreFolders:
       typeof raw.restoreFolders === 'boolean' ? raw.restoreFolders : fallback.restoreFolders,
+    defaultSurface:
+      raw.defaultSurface === 'modal' || raw.defaultSurface === 'drawer'
+        ? raw.defaultSurface
+        : fallback.defaultSurface,
   };
 }
 
@@ -96,17 +100,31 @@ async function writeTextAsStagedFile(
 // Register Command Palette shortcuts for quick access
 const WAREHOUSE_COMMANDS: SpindleCommandDTO[] = [
   {
+    id: 'open-export-modal',
+    label: 'Warehouse: Batch Export Characters (Modal)',
+    description: 'Open Warehouse in a large modal to batch export characters into a ZIP archive (JSON, PNG, or CHARX)',
+    keywords: ['warehouse', 'batch', 'export', 'modal', 'zip', 'charx', 'png', 'json', 'characters', 'backup'],
+    scope: 'global',
+  },
+  {
+    id: 'open-import-modal',
+    label: 'Warehouse: Batch Import Character Archive (Modal)',
+    description: 'Open Warehouse in a large modal to import characters from a Warehouse or character ZIP bundle',
+    keywords: ['warehouse', 'batch', 'import', 'modal', 'zip', 'charx', 'png', 'json', 'characters', 'restore'],
+    scope: 'global',
+  },
+  {
     id: 'open-export',
-    label: 'Warehouse: Batch Export Characters',
-    description: 'Open Warehouse to batch export characters into a ZIP archive (JSON, PNG, or CHARX)',
-    keywords: ['warehouse', 'batch', 'export', 'zip', 'charx', 'png', 'json', 'characters', 'backup'],
+    label: 'Warehouse: Open Batch Export in Sidebar',
+    description: 'Open the Warehouse sidebar drawer tab in Batch Export mode',
+    keywords: ['warehouse', 'batch', 'export', 'sidebar', 'drawer', 'zip', 'charx', 'png', 'json', 'characters'],
     scope: 'global',
   },
   {
     id: 'open-import',
-    label: 'Warehouse: Batch Import Character Archive',
-    description: 'Open Warehouse to import characters from a Warehouse or character ZIP bundle',
-    keywords: ['warehouse', 'batch', 'import', 'zip', 'charx', 'png', 'json', 'characters', 'restore'],
+    label: 'Warehouse: Open Batch Import in Sidebar',
+    description: 'Open the Warehouse sidebar drawer tab in Batch Import mode',
+    keywords: ['warehouse', 'batch', 'import', 'sidebar', 'drawer', 'zip', 'charx', 'png', 'json', 'characters'],
     scope: 'global',
   },
 ];
@@ -119,10 +137,30 @@ spindle.commands.onInvoked(
     _context: SpindleCommandContextDTO,
     origin?: { userId: string; frontendSessionId?: string }
   ) => {
-    if (commandId === 'open-export') {
-      sendToSession({ type: 'open_tab', mode: 'export' }, origin?.userId, origin?.frontendSessionId);
+    if (commandId === 'open-export-modal') {
+      sendToSession(
+        { type: 'open_tab', mode: 'export', surface: 'modal' },
+        origin?.userId,
+        origin?.frontendSessionId
+      );
+    } else if (commandId === 'open-import-modal') {
+      sendToSession(
+        { type: 'open_tab', mode: 'import', surface: 'modal' },
+        origin?.userId,
+        origin?.frontendSessionId
+      );
+    } else if (commandId === 'open-export') {
+      sendToSession(
+        { type: 'open_tab', mode: 'export', surface: 'drawer' },
+        origin?.userId,
+        origin?.frontendSessionId
+      );
     } else if (commandId === 'open-import') {
-      sendToSession({ type: 'open_tab', mode: 'import' }, origin?.userId, origin?.frontendSessionId);
+      sendToSession(
+        { type: 'open_tab', mode: 'import', surface: 'drawer' },
+        origin?.userId,
+        origin?.frontendSessionId
+      );
     }
   }
 );

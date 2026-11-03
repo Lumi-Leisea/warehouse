@@ -6,7 +6,8 @@ var DEFAULT_PREFERENCES = {
   packagingMode: "browser",
   concurrency: 3,
   skipDuplicates: false,
-  restoreFolders: true
+  restoreFolders: true,
+  defaultSurface: "modal"
 };
 
 // src/zip.ts
@@ -489,14 +490,44 @@ var WAREHOUSE_STYLES = `
   padding-bottom: 18px;
 }
 
+.wh-mode-bar-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .wh-mode-bar {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px;
   padding: 4px;
+  flex: 1;
   background: var(--lumiverse-fill-subtle, rgba(255, 255, 255, 0.03));
   border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
   border-radius: var(--lumiverse-radius, 10px);
+}
+
+.wh-surface-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 11px;
+  border-radius: var(--lumiverse-radius, 10px);
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.12));
+  background: var(--lumiverse-fill, rgba(255, 255, 255, 0.05));
+  color: var(--lumiverse-text, #f4f4f6);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.wh-surface-btn:hover {
+  border-color: var(--lumiverse-accent, #8b5cf6);
+  background: rgba(139, 92, 246, 0.14);
 }
 
 .wh-mode-btn {
@@ -729,6 +760,41 @@ var WAREHOUSE_STYLES = `
   max-height: 320px;
   overflow-y: auto;
   padding-right: 2px;
+}
+
+.wh-root.is-modal .wh-char-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(275px, 1fr));
+  gap: 7px;
+  max-height: 460px;
+  align-content: start;
+}
+
+.wh-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.07));
+  font-size: 11.5px;
+  color: var(--lumiverse-text-muted, #a1a1aa);
+}
+
+.wh-pager-controls {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.wh-modal-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px 14px;
+  text-align: center;
 }
 
 .wh-char-item {
@@ -970,11 +1036,16 @@ function setup(ctx) {
   let characters = [];
   let availableTags = [];
   let isLoadingLibrary = false;
+  let libraryLoadedCount = 0;
+  let libraryTotalCount = 0;
   let libraryError = null;
   let searchQuery = "";
   let folderFilter = "__ALL__";
   let tagFilter = "__ALL__";
+  let exportPage = 0;
+  let importPage = 0;
   const selectedCharIds = new Set;
+  let activeModal = null;
   let isExporting = false;
   let exportCancelRequested = false;
   let exportAbortController = null;
@@ -1122,13 +1193,51 @@ function setup(ctx) {
     iconSvg: WAREHOUSE_ICON_SVG,
     defaultOpen: false
   });
-  const root = el("div", { className: "wh-root" });
-  tab.root.appendChild(root);
+  const drawerRoot = el("div", { className: "wh-root" });
+  const modalRoot = el("div", { className: "wh-root is-modal" });
+  tab.root.appendChild(drawerRoot);
+  function openWarehouseModal(mode) {
+    if (mode) {
+      activeMode = mode;
+    }
+    if (activeModal) {
+      render();
+      return;
+    }
+    try {
+      const modalHandle = ctx.ui.showModal({
+        title: `Warehouse — Batch Character ${activeMode === "export" ? "Export" : "Import"} (${characters.length.toLocaleString()} cards)`,
+        width: 1120,
+        maxHeight: 860
+      });
+      activeModal = modalHandle;
+      modalHandle.root.appendChild(modalRoot);
+      modalHandle.onDismiss(() => {
+        if (activeModal === modalHandle) {
+          activeModal = null;
+          render();
+        }
+      });
+      render();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(`Could not open modal: ${msg}`, "error");
+    }
+  }
+  function closeWarehouseModal() {
+    if (!activeModal)
+      return;
+    const handle = activeModal;
+    activeModal = null;
+    handle.dismiss();
+    render();
+  }
   let progressLabelEl = null;
   let progressSubLabelEl = null;
   let progressFillEl = null;
   let progressPctEl = null;
   let charListContainerEl = null;
+  let charListPagerEl = null;
   let selectionSummaryEl = null;
   let exportButtonEl = null;
   function renderProgressOnly() {
@@ -1182,27 +1291,39 @@ function setup(ctx) {
     if (isLoadingLibrary)
       return;
     isLoadingLibrary = true;
+    libraryLoadedCount = 0;
+    libraryTotalCount = 0;
     libraryError = null;
     render();
     try {
       const allItems = [];
-      const pageSize = 500;
+      const pageSize = 1000;
       let offset = 0;
       let total = 0;
       do {
-        const res = await fetch(`/api/v1/characters/summary?limit=${pageSize}&offset=${offset}&sort=name&order=asc`);
+        const res = await fetch(`/api/v1/characters/summary?limit=${pageSize}&offset=${offset}&sort=name&direction=asc`);
         if (!res.ok) {
           throw new Error(`Failed to fetch characters (HTTP ${res.status})`);
         }
         const data = await res.json();
-        const pageItems = Array.isArray(data.items) ? data.items : [];
+        const pageItems = Array.isArray(data.data) ? data.data : Array.isArray(data.items) ? data.items : [];
         allItems.push(...pageItems);
         total = typeof data.total === "number" ? data.total : allItems.length;
         offset += pageItems.length;
+        libraryLoadedCount = allItems.length;
+        libraryTotalCount = total;
+        if (charListContainerEl && isLoadingLibrary) {
+          charListContainerEl.innerHTML = "";
+          charListContainerEl.appendChild(el("div", {
+            className: "wh-empty",
+            text: `Loading character library... (${libraryLoadedCount.toLocaleString()} / ${libraryTotalCount.toLocaleString()})`
+          }));
+        }
         if (pageItems.length === 0)
           break;
       } while (offset < total);
       characters = allItems;
+      exportPage = 0;
       const validIds = new Set(characters.map((c) => c.id));
       for (const id of Array.from(selectedCharIds)) {
         if (!validIds.has(id))
@@ -1216,10 +1337,19 @@ function setup(ctx) {
       try {
         const tagRes = await fetch("/api/v1/characters/tags");
         if (tagRes.ok) {
-          const tagData = await tagRes.json();
-          if (Array.isArray(tagData.tags)) {
-            availableTags = tagData.tags.slice().sort((a, b) => a.localeCompare(b));
+          const tagRaw = await tagRes.json();
+          const rawList = Array.isArray(tagRaw) ? tagRaw : tagRaw && typeof tagRaw === "object" && Array.isArray(tagRaw.tags) ? tagRaw.tags : [];
+          const parsedTags = [];
+          for (const entry of rawList) {
+            if (typeof entry === "string" && entry.trim()) {
+              parsedTags.push(entry.trim());
+            } else if (entry && typeof entry === "object" && typeof entry.tag === "string") {
+              const t = (entry.tag || "").trim();
+              if (t)
+                parsedTags.push(t);
+            }
           }
+          availableTags = Array.from(new Set(parsedTags)).sort((a, b) => a.localeCompare(b));
         }
       } catch {}
     } catch (err) {
@@ -1443,6 +1573,7 @@ function setup(ctx) {
     inspectedZip = null;
     zipInspectError = null;
     importResultsSummary = null;
+    importPage = 0;
     selectedZipEntryPaths.clear();
     if (!file.name.toLowerCase().endsWith(".zip")) {
       zipInspectError = `"${file.name}" is not a .zip archive. Please select a Warehouse .zip bundle or any .zip containing .charx, .png, or .json character cards.`;
@@ -1622,20 +1753,32 @@ function setup(ctx) {
       render();
     }
   }
+  const EXPORT_PAGE_SIZE_MODAL = 200;
+  const EXPORT_PAGE_SIZE_DRAWER = 100;
+  const IMPORT_PAGE_SIZE_MODAL = 200;
+  const IMPORT_PAGE_SIZE_DRAWER = 100;
   function updateCharacterListSelectionUI() {
     const filtered = getFilteredCharacters();
     if (selectionSummaryEl) {
-      selectionSummaryEl.textContent = `${selectedCharIds.size} of ${characters.length} selected (${filtered.length} shown)`;
+      selectionSummaryEl.textContent = `${selectedCharIds.size.toLocaleString()} of ${characters.length.toLocaleString()} selected (${filtered.length.toLocaleString()} shown)`;
     }
     if (exportButtonEl) {
       exportButtonEl.disabled = isExporting || selectedCharIds.size === 0;
-      exportButtonEl.textContent = isExporting ? "Exporting..." : `Export ${selectedCharIds.size} Character${selectedCharIds.size === 1 ? "" : "s"} as .ZIP (${preferences.exportFormat.toUpperCase()})`;
+      exportButtonEl.textContent = isExporting ? "Exporting..." : `Export ${selectedCharIds.size.toLocaleString()} Character${selectedCharIds.size === 1 ? "" : "s"} as .ZIP (${preferences.exportFormat.toUpperCase()})`;
     }
     if (!charListContainerEl)
       return;
     charListContainerEl.innerHTML = "";
+    if (charListPagerEl) {
+      charListPagerEl.innerHTML = "";
+      charListPagerEl.style.display = "none";
+    }
     if (isLoadingLibrary) {
-      charListContainerEl.appendChild(el("div", { className: "wh-empty", text: "Loading character library..." }));
+      const progressDetail = libraryTotalCount > 0 ? ` (${libraryLoadedCount.toLocaleString()} / ${libraryTotalCount.toLocaleString()})` : "";
+      charListContainerEl.appendChild(el("div", {
+        className: "wh-empty",
+        text: `Loading character library...${progressDetail}`
+      }));
       return;
     }
     if (libraryError) {
@@ -1649,7 +1792,15 @@ function setup(ctx) {
       }));
       return;
     }
-    for (const char of filtered) {
+    const pageSize = activeModal ? EXPORT_PAGE_SIZE_MODAL : EXPORT_PAGE_SIZE_DRAWER;
+    const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    if (exportPage >= totalPages)
+      exportPage = totalPages - 1;
+    if (exportPage < 0)
+      exportPage = 0;
+    const startIdx = exportPage * pageSize;
+    const pageSlice = filtered.slice(startIdx, startIdx + pageSize);
+    for (const char of pageSlice) {
       const isSelected = selectedCharIds.has(char.id);
       const row = el("div", {
         className: `wh-char-item${isSelected ? " is-selected" : ""}`
@@ -1701,11 +1852,11 @@ function setup(ctx) {
           row.classList.add("is-selected");
         }
         if (selectionSummaryEl) {
-          selectionSummaryEl.textContent = `${selectedCharIds.size} of ${characters.length} selected (${filtered.length} shown)`;
+          selectionSummaryEl.textContent = `${selectedCharIds.size.toLocaleString()} of ${characters.length.toLocaleString()} selected (${filtered.length.toLocaleString()} shown)`;
         }
         if (exportButtonEl) {
           exportButtonEl.disabled = isExporting || selectedCharIds.size === 0;
-          exportButtonEl.textContent = `Export ${selectedCharIds.size} Character${selectedCharIds.size === 1 ? "" : "s"} as .ZIP (${preferences.exportFormat.toUpperCase()})`;
+          exportButtonEl.textContent = `Export ${selectedCharIds.size.toLocaleString()} Character${selectedCharIds.size === 1 ? "" : "s"} as .ZIP (${preferences.exportFormat.toUpperCase()})`;
         }
       };
       row.addEventListener("click", (e) => {
@@ -1717,6 +1868,43 @@ function setup(ctx) {
         toggleChar();
       });
       charListContainerEl.appendChild(row);
+    }
+    if (charListPagerEl && totalPages > 1) {
+      charListPagerEl.style.display = "flex";
+      const rangeStart = startIdx + 1;
+      const rangeEnd = Math.min(filtered.length, startIdx + pageSlice.length);
+      const prevBtn = el("button", {
+        className: "wh-mini-btn",
+        text: "← Prev",
+        attrs: { type: "button" },
+        on: {
+          click: () => {
+            if (exportPage > 0) {
+              exportPage -= 1;
+              updateCharacterListSelectionUI();
+            }
+          }
+        }
+      });
+      prevBtn.disabled = exportPage <= 0;
+      const nextBtn = el("button", {
+        className: "wh-mini-btn",
+        text: "Next →",
+        attrs: { type: "button" },
+        on: {
+          click: () => {
+            if (exportPage < totalPages - 1) {
+              exportPage += 1;
+              updateCharacterListSelectionUI();
+            }
+          }
+        }
+      });
+      nextBtn.disabled = exportPage >= totalPages - 1;
+      charListPagerEl.appendChild(el("span", {
+        text: `Showing ${rangeStart.toLocaleString()}–${rangeEnd.toLocaleString()} of ${filtered.length.toLocaleString()} • Page ${exportPage + 1} of ${totalPages}`
+      }));
+      charListPagerEl.appendChild(el("div", { className: "wh-pager-controls" }, [prevBtn, nextBtn]));
     }
   }
   function renderExportView() {
@@ -1812,6 +2000,7 @@ function setup(ctx) {
     });
     searchInput.addEventListener("input", () => {
       searchQuery = searchInput.value;
+      exportPage = 0;
       updateCharacterListSelectionUI();
     });
     filterBar.appendChild(searchInput);
@@ -1825,6 +2014,7 @@ function setup(ctx) {
     folderSelect.value = folderFilter;
     folderSelect.addEventListener("change", () => {
       folderFilter = folderSelect.value;
+      exportPage = 0;
       updateCharacterListSelectionUI();
     });
     const tagSelect = el("select", { className: "wh-select" });
@@ -1835,6 +2025,7 @@ function setup(ctx) {
     tagSelect.value = tagFilter;
     tagSelect.addEventListener("change", () => {
       tagFilter = tagSelect.value;
+      exportPage = 0;
       updateCharacterListSelectionUI();
     });
     filterRow.appendChild(folderSelect);
@@ -1910,7 +2101,9 @@ function setup(ctx) {
     toolbar.appendChild(refreshBtn);
     selectPanel.appendChild(toolbar);
     charListContainerEl = el("div", { className: "wh-char-list" });
+    charListPagerEl = el("div", { className: "wh-pager", style: { display: "none" } });
     selectPanel.appendChild(charListContainerEl);
+    selectPanel.appendChild(charListPagerEl);
     container.appendChild(selectPanel);
     const actionPanel = el("div", { className: "wh-panel" });
     if (isExporting) {
@@ -2140,8 +2333,16 @@ function setup(ctx) {
         ])
       ]);
       contentsPanel.appendChild(toolbar);
+      const importPageSize = activeModal ? IMPORT_PAGE_SIZE_MODAL : IMPORT_PAGE_SIZE_DRAWER;
+      const totalImportPages = Math.max(1, Math.ceil(inspectedZip.entries.length / importPageSize));
+      if (importPage >= totalImportPages)
+        importPage = totalImportPages - 1;
+      if (importPage < 0)
+        importPage = 0;
+      const importStartIdx = importPage * importPageSize;
+      const importPageSlice = inspectedZip.entries.slice(importStartIdx, importStartIdx + importPageSize);
       const listEl = el("div", { className: "wh-char-list" });
-      for (const candidate of inspectedZip.entries) {
+      for (const candidate of importPageSlice) {
         const isChecked = selectedZipEntryPaths.has(candidate.archivePath);
         const itemRow = el("div", {
           className: `wh-char-item${isChecked ? " is-selected" : ""}`
@@ -2189,6 +2390,44 @@ function setup(ctx) {
         listEl.appendChild(itemRow);
       }
       contentsPanel.appendChild(listEl);
+      if (totalImportPages > 1) {
+        const rangeStart = importStartIdx + 1;
+        const rangeEnd = Math.min(inspectedZip.entries.length, importStartIdx + importPageSlice.length);
+        const prevBtn = el("button", {
+          className: "wh-mini-btn",
+          text: "← Prev",
+          attrs: { type: "button" },
+          on: {
+            click: () => {
+              if (importPage > 0) {
+                importPage -= 1;
+                render();
+              }
+            }
+          }
+        });
+        prevBtn.disabled = importPage <= 0;
+        const nextBtn = el("button", {
+          className: "wh-mini-btn",
+          text: "Next →",
+          attrs: { type: "button" },
+          on: {
+            click: () => {
+              if (importPage < totalImportPages - 1) {
+                importPage += 1;
+                render();
+              }
+            }
+          }
+        });
+        nextBtn.disabled = importPage >= totalImportPages - 1;
+        contentsPanel.appendChild(el("div", { className: "wh-pager" }, [
+          el("span", {
+            text: `Showing ${rangeStart.toLocaleString()}–${rangeEnd.toLocaleString()} of ${inspectedZip.entries.length.toLocaleString()} • Page ${importPage + 1} of ${totalImportPages}`
+          }),
+          el("div", { className: "wh-pager-controls" }, [prevBtn, nextBtn])
+        ]));
+      }
       if (isImporting) {
         progressLabelEl = el("div", {
           className: "wh-panel-title",
@@ -2270,9 +2509,35 @@ function setup(ctx) {
     progressFillEl = null;
     progressPctEl = null;
     charListContainerEl = null;
+    charListPagerEl = null;
     selectionSummaryEl = null;
     exportButtonEl = null;
-    root.innerHTML = "";
+    const activeRoot = activeModal ? modalRoot : drawerRoot;
+    drawerRoot.innerHTML = "";
+    modalRoot.innerHTML = "";
+    if (activeModal) {
+      activeModal.setTitle(`Warehouse — Batch Character ${activeMode === "export" ? "Export" : "Import"} (${characters.length.toLocaleString()} cards)`);
+      drawerRoot.appendChild(el("div", { className: "wh-panel wh-modal-placeholder" }, [
+        el("div", {
+          className: "wh-panel-title",
+          text: "Warehouse is open in Modal View"
+        }),
+        el("div", {
+          className: "wh-panel-subtitle",
+          text: "Using wide multi-column layout for large character libraries."
+        }),
+        el("button", {
+          className: "wh-secondary-btn",
+          text: "Switch Back to Sidebar View",
+          attrs: { type: "button" },
+          on: {
+            click: () => {
+              closeWarehouseModal();
+            }
+          }
+        })
+      ]));
+    }
     const modeBar = el("div", { className: "wh-mode-bar" }, [
       el("button", {
         className: `wh-mode-btn${activeMode === "export" ? " is-active" : ""}`,
@@ -2301,11 +2566,32 @@ function setup(ctx) {
         }
       })
     ]);
-    root.appendChild(modeBar);
+    const surfaceToggleBtn = el("button", {
+      className: "wh-surface-btn",
+      text: activeModal ? "Dock to Sidebar" : "Pop Out Modal ⤢",
+      attrs: {
+        type: "button",
+        title: activeModal ? "Close modal and return to the sidebar drawer" : "Open Warehouse in a large multi-column modal window"
+      },
+      on: {
+        click: () => {
+          if (activeModal) {
+            closeWarehouseModal();
+          } else {
+            openWarehouseModal(activeMode);
+          }
+        }
+      }
+    });
+    const topBarWrap = el("div", { className: "wh-mode-bar-wrap" }, [
+      modeBar,
+      surfaceToggleBtn
+    ]);
+    activeRoot.appendChild(topBarWrap);
     if (activeMode === "export") {
-      root.appendChild(renderExportView());
+      activeRoot.appendChild(renderExportView());
     } else {
-      root.appendChild(renderImportView());
+      activeRoot.appendChild(renderImportView());
     }
   }
   ctx.onBackendMessage((rawData) => {
@@ -2320,8 +2606,16 @@ function setup(ctx) {
       }
       case "open_tab": {
         activeMode = msg.mode === "import" ? "import" : "export";
-        tab.activate();
-        render();
+        const targetSurface = msg.surface || preferences.defaultSurface || "modal";
+        if (targetSurface === "modal") {
+          openWarehouseModal(activeMode);
+        } else {
+          if (activeModal) {
+            closeWarehouseModal();
+          }
+          tab.activate();
+          render();
+        }
         break;
       }
       case "archive_ready": {

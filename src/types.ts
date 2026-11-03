@@ -2,6 +2,8 @@ export type CharacterExportFormat = 'charx' | 'png' | 'json';
 
 export type WarehousePackagingMode = 'browser' | 'host';
 
+export type WarehouseDisplaySurface = 'modal' | 'drawer';
+
 export interface WarehousePreferences {
   exportFormat: CharacterExportFormat;
   organizeByFolder: boolean;
@@ -10,6 +12,7 @@ export interface WarehousePreferences {
   concurrency: number;
   skipDuplicates: boolean;
   restoreFolders: boolean;
+  defaultSurface: WarehouseDisplaySurface;
 }
 
 export const DEFAULT_PREFERENCES: WarehousePreferences = {
@@ -20,6 +23,7 @@ export const DEFAULT_PREFERENCES: WarehousePreferences = {
   concurrency: 3,
   skipDuplicates: false,
   restoreFolders: true,
+  defaultSurface: 'modal',
 };
 
 export interface CharacterSummaryItem {
@@ -126,6 +130,7 @@ export type BackendToFrontendMessage =
   | {
       type: 'open_tab';
       mode: 'export' | 'import';
+      surface?: WarehouseDisplaySurface;
     }
   | {
       type: 'archive_ready';
