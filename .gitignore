@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Note: dist/ is intentionally tracked so Warehouse can be installed directly
+# as a prebuilt Spindle extension without requiring a local build step.
+
+# TypeScript & bundler caches
+*.tsbuildinfo
+.cache/
+.tmp/
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+

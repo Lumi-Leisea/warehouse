@@ -1,0 +1,136 @@
+export type CharacterExportFormat = 'charx' | 'png' | 'json';
+
+export type WarehousePackagingMode = 'browser' | 'host';
+
+export interface WarehousePreferences {
+  exportFormat: CharacterExportFormat;
+  organizeByFolder: boolean;
+  includeManifest: boolean;
+  packagingMode: WarehousePackagingMode;
+  concurrency: number;
+  skipDuplicates: boolean;
+  restoreFolders: boolean;
+}
+
+export const DEFAULT_PREFERENCES: WarehousePreferences = {
+  exportFormat: 'charx',
+  organizeByFolder: true,
+  includeManifest: true,
+  packagingMode: 'browser',
+  concurrency: 3,
+  skipDuplicates: false,
+  restoreFolders: true,
+};
+
+export interface CharacterSummaryItem {
+  id: string;
+  name: string;
+  description?: string;
+  avatar?: string;
+  tags?: string[];
+  creator?: string;
+  folder?: string;
+  chat_date?: number;
+  date_added?: number;
+}
+
+export interface ImportJobItemResult {
+  index: number;
+  filename: string;
+  status: 'imported' | 'skipped' | 'error';
+  character?: { id: string; name: string };
+  error?: string;
+}
+
+export interface ImportJobStatusResponse {
+  jobId: string;
+  status: 'uploading' | 'processing' | 'complete' | 'cancelled' | 'error';
+  total: number;
+  uploaded: number;
+  processed: number;
+  succeeded: number;
+  skipped: number;
+  failed: number;
+  results: ImportJobItemResult[];
+}
+
+export interface WarehouseManifestEntry {
+  /** Path inside the ZIP archive (using forward slashes). */
+  archivePath: string;
+  /** Original character ID on the exporting instance. */
+  characterId: string;
+  /** Character display name. */
+  name: string;
+  /** Creator name, if set. */
+  creator: string;
+  /** Lumiverse character browser folder ("" if root). */
+  folder: string;
+  /** Character tags at export time. */
+  tags: string[];
+  /** Export format of this entry. */
+  format: CharacterExportFormat;
+  /** Byte size of the exported file. */
+  sizeBytes: number;
+}
+
+export interface WarehouseBundleManifest {
+  schema: 'lumiverse.warehouse.bundle';
+  version: 1;
+  creator: string;
+  exportedAt: string;
+  format: CharacterExportFormat;
+  totalCharacters: number;
+  entries: WarehouseManifestEntry[];
+}
+
+export interface StagedArchiveEntryInput {
+  name: string;
+  uploadId: string;
+  store: boolean;
+}
+
+export type FrontendToBackendMessage =
+  | {
+      type: 'load_preferences';
+    }
+  | {
+      type: 'save_preferences';
+      preferences: Partial<WarehousePreferences>;
+    }
+  | {
+      type: 'assemble_archive';
+      jobId: string;
+      fileName: string;
+      entries: StagedArchiveEntryInput[];
+      manifestJson?: string;
+    }
+  | {
+      type: 'cleanup_uploads';
+      uploadIds: string[];
+    }
+  | {
+      type: 'cleanup_archive';
+      fileId: string;
+    };
+
+export type BackendToFrontendMessage =
+  | {
+      type: 'preferences_loaded';
+      preferences: WarehousePreferences;
+    }
+  | {
+      type: 'open_tab';
+      mode: 'export' | 'import';
+    }
+  | {
+      type: 'archive_ready';
+      jobId: string;
+      fileId: string;
+      fileName: string;
+      size: number;
+    }
+  | {
+      type: 'archive_error';
+      jobId: string;
+      error: string;
+    };
