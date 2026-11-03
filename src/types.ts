@@ -39,23 +39,28 @@ export interface CharacterSummaryItem {
 }
 
 export interface ImportJobItemResult {
-  index: number;
   filename: string;
-  status: 'imported' | 'skipped' | 'error';
+  success: boolean;
+  skipped?: boolean;
   character?: { id: string; name: string };
+  lorebook?: { name: string; entryCount: number };
   error?: string;
 }
 
 export interface ImportJobStatusResponse {
   jobId: string;
-  status: 'uploading' | 'processing' | 'complete' | 'cancelled' | 'error';
+  status: 'accepting' | 'uploading' | 'processing' | 'complete' | 'cancelled' | 'error';
   total: number;
   uploaded: number;
   processed: number;
-  succeeded: number;
-  skipped: number;
-  failed: number;
   results: ImportJobItemResult[];
+  summary?: {
+    total: number;
+    imported: number;
+    skipped: number;
+    failed: number;
+  };
+  error?: string;
 }
 
 export interface WarehouseManifestEntry {

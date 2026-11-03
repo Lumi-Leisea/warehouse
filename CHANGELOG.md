@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - **PNG Card (`.png`)**: Character avatar PNG with embedded base64 CCSv3 (`ccv3`) metadata and attached World Books.
     - **JSON Card (`.json`)**: CCSv3 (`chara_card_v3`) JSON card with merged `character_book`.
   - Live WebSocket progress listener (`CHARACTER_EXPORT_PROGRESS`) for real-time asset packaging feedback during CHARX exports.
-  - Character library browser with live search (by name, creator, folder, or tag), Folder filter, Tag filter, and quick selection controls (`Select Shown`, `Select All`, `Invert Shown`, `Clear`).
+  - Character library browser with LumiTag-style search syntax (`T:` tag, `C:` character name, `F:` folder, `A:` author/creator, space `AND`, comma `OR`, `-` negation, and `"..."` quotes), built-in Search Syntax Help modal, Folder filter, Tag filter, and quick selection controls (`Select Shown`, `Select All`, `Invert Shown`, `Clear`).
   - Automatic subfolder organization inside the `.zip` archive (`FolderName/CharacterName.ext`) with filename collision disambiguation.
   - Optional `warehouse-manifest.json` bundle metadata for preserving exact folder assignments and export metadata on re-import.
   - Dual ZIP64 packaging modes:

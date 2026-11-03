@@ -1,6 +1,6 @@
 {
   "name": "warehouse",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "description": "Batch export characters in JSON, PNG, or CHARX format into a .zip archive, and batch re-import zipped character archives back into Lumiverse.",
   "author": "Eleisea",
   "license": "SEE LICENSE IN LICENSE.md",

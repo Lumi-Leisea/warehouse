@@ -14,7 +14,7 @@
   - **PNG Card (`.png`)**: Character avatar PNG with embedded CCSv3 (`ccv3`) base64 metadata and attached World Books.
   - **JSON Card (`.json`)**: Lightweight CCSv3 (`chara_card_v3`) JSON definition with merged `character_book`.
 - **Library Filtering & Quick Selection:**
-  - Search characters by name, creator, folder, or tag.
+  - LumiTag-style search syntax with prefixes: bare text or `C:` for character name, `T:` for whole-tag match, `F:` for folder (`F:unfiled` for unfiled cards), `A:` for author/creator, spaces for `AND`, commas for `OR`, `-` for negation (`-T:Dark`), and quotes for multi-word values (`F:"My Folder"`). Includes a built-in **Search Syntax Help** reference modal.
   - Filter by **Folder** (`All Folders`, `Unfiled`, or any specific folder) and **Tag**.
   - One-click **Select Shown**, **Select All**, **Invert Shown**, and **Clear**.
 - **Folder Structure & Manifest Preservation:**

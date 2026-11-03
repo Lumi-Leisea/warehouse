@@ -1,14 +1,15 @@
 {
-  "version": "1.0.0",
+  "version": "1.0.4",
   "name": "Warehouse",
   "identifier": "warehouse",
   "author": "Eleisea",
   "github": "https://github.com/Lumi-Leisea/warehouse",
   "homepage": "https://github.com/Lumi-Leisea/warehouse",
   "description": "Batch export characters in JSON, PNG, or CHARX format into a .zip archive, and batch re-import zipped character archives back into Lumiverse.",
-  "permissions": ["characters"],
+  "permissions": [
+    "characters"
+  ],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js",
   "minimum_lumiverse_version": "0.1.0"
 }
-

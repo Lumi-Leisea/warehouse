@@ -1,5 +1,13 @@
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types';
 import {
+  buildCharacterMatchContext,
+  evaluateCharacterQuery,
+  getWarehouseSearchHelpSections,
+  parseQuery,
+  type CharacterMatchContext,
+  type ParsedQuery,
+} from './search';
+import {
   DEFAULT_PREFERENCES,
   type BackendToFrontendMessage,
   type CharacterExportFormat,
@@ -20,12 +28,7 @@ import {
   type ParsedZipCardEntry,
 } from './zip';
 
-const WAREHOUSE_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/>
-  <path d="m3.3 7 8.7 5 8.7-5"/>
-  <path d="M12 22V12"/>
-  <path d="m7.5 4.27 9 5.15"/>
-</svg>`;
+const WAREHOUSE_ICON_SVG = `<svg viewBox="0 0 24 24"><path fill="currentColor" d="M5.75 2.75h12.5V2h1.5v20h-1.5v-1.5H5.75V22h-1.5V2h1.5ZM15.926 19h2.324v-3.917H5.75V19h1.717v-2.52c0-.119-.011-.22.059-.324a.35.35 0 0 1 .257-.154c.044-.005.089-.002.134-.002h2.1c.045 0 .09-.003.134.002c.11.01.21.074.266.168c.062.103.05.205.05.32V19h2.459v-2.52c0-.119-.011-.22.059-.324a.35.35 0 0 1 .257-.154c.044-.005.09-.002.134-.002h2.1c.045 0 .09-.003.134.002c.11.01.21.074.266.168c.062.103.05.205.05.32Zm-1.036-5.417h3.36V9.667H5.75v3.916h2.14v-2.667l.005-.042a.4.4 0 0 1 .036-.106a.35.35 0 0 1 .241-.178c.061-.012.162-.007.228-.007h2.02c.132 0 .232-.01.342.08a.35.35 0 0 1 .126.236c.006.055.002.119.002.174v2.51h1v-2.51c0-.114-.012-.217.05-.32a.35.35 0 0 1 .266-.168c.044-.004.09-.002.134-.002h2.1c.045 0 .09-.002.134.002c.104.01.199.068.257.154c.07.105.059.205.059.324Zm1.64-5.416h1.72V4.25H5.75v3.917h7.78V5.656c0-.114-.012-.216.05-.319a.35.35 0 0 1 .266-.169c.044-.004.089-.001.134-.001h2.1c.045 0 .09-.003.134.001a.36.36 0 0 1 .257.154c.07.105.059.205.059.324Z"/></svg>`;
 
 const WAREHOUSE_STYLES = `
 .wh-root {
@@ -576,6 +579,98 @@ const WAREHOUSE_STYLES = `
 .wh-status-err {
   color: #f87171;
 }
+
+.wh-search-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.wh-search-row .wh-input {
+  flex: 1;
+}
+
+.wh-query-errors {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(250, 204, 21, 0.35);
+  border-radius: 8px;
+  background: rgba(250, 204, 21, 0.08);
+  color: var(--lumiverse-text-muted, #a1a1aa);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.wh-query-errors strong {
+  color: #facc15;
+  font-weight: 600;
+}
+
+.wh-query-errors ul {
+  margin: 5px 0 0;
+  padding-left: 18px;
+  list-style: disc;
+}
+
+.wh-help-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--lumiverse-text, #f4f4f6);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.wh-help-intro {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--lumiverse-text-muted, #a1a1aa);
+}
+
+.wh-help-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wh-help-heading {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--lumiverse-text-muted, #a1a1aa);
+}
+
+.wh-help-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wh-help-item {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--lumiverse-text-muted, #a1a1aa);
+}
+
+.wh-help-code {
+  display: inline-block;
+  padding: 1px 6px;
+  margin-right: 6px;
+  border-radius: 5px;
+  background: rgba(56, 189, 248, 0.14);
+  color: #38bdf8;
+  font-family: var(--lumiverse-font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.wh-help-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 6px;
+}
 `;
 
 interface PendingArchiveAssembly {
@@ -600,18 +695,21 @@ export function setup(ctx: SpindleFrontendContext): void {
 
   // Character library state
   let characters: CharacterSummaryItem[] = [];
+  const characterMatchContexts = new Map<string, CharacterMatchContext>();
   let availableTags: string[] = [];
   let isLoadingLibrary = false;
   let libraryLoadedCount = 0;
   let libraryTotalCount = 0;
   let libraryError: string | null = null;
   let searchQuery = '';
+  let lastValidParsedQuery: ParsedQuery = parseQuery('');
   let folderFilter = '__ALL__';
   let tagFilter = '__ALL__';
   let exportPage = 0;
   let importPage = 0;
   const selectedCharIds = new Set<string>();
   let activeModal: ReturnType<SpindleFrontendContext['ui']['showModal']> | null = null;
+  let activeHelpModal: ReturnType<SpindleFrontendContext['ui']['showModal']> | null = null;
 
   // Export run state
   let isExporting = false;
@@ -776,9 +874,8 @@ export function setup(ctx: SpindleFrontendContext): void {
       return;
     }
     if (typeof data.processed === 'number' && typeof data.total === 'number' && data.total > 0) {
-      exportSubStatusText = `Packaging CHARX assets (${data.processed}/${data.total})${
-        data.detail ? ` — ${data.detail}` : ''
-      }`;
+      exportSubStatusText = `Packaging CHARX assets (${data.processed}/${data.total})${data.detail ? ` — ${data.detail}` : ''
+        }`;
       renderProgressOnly();
     }
   });
@@ -858,6 +955,97 @@ export function setup(ctx: SpindleFrontendContext): void {
   let charListPagerEl: HTMLElement | null = null;
   let selectionSummaryEl: HTMLElement | null = null;
   let exportButtonEl: HTMLButtonElement | null = null;
+  let queryErrorsContainerEl: HTMLElement | null = null;
+
+  function openSearchHelpModal(): void {
+    if (activeHelpModal) {
+      return;
+    }
+    try {
+      const helpHandle = ctx.ui.showModal({
+        title: 'Search help — Warehouse',
+        width: 580,
+        maxHeight: 760,
+      });
+      activeHelpModal = helpHandle;
+      helpHandle.onDismiss(() => {
+        if (activeHelpModal === helpHandle) {
+          activeHelpModal = null;
+        }
+      });
+
+      const dialogBody = el('div', { className: 'wh-help-dialog' }, [
+        el('p', {
+          className: 'wh-help-intro',
+          text: 'Use LumiTag-style search prefixes to filter characters by name, tag, folder, or author/creator.',
+        }),
+      ]);
+
+      for (const section of getWarehouseSearchHelpSections()) {
+        const secEl = el('section', { className: 'wh-help-section' }, [
+          el('h4', { className: 'wh-help-heading', text: section.heading }),
+        ]);
+        if (section.intro) {
+          secEl.appendChild(el('p', { className: 'wh-help-intro', text: section.intro }));
+        }
+        const listEl = el('div', { className: 'wh-help-list' });
+        for (const ex of section.examples) {
+          const itemEl = el('div', { className: 'wh-help-item' }, [
+            el('code', { className: 'wh-help-code', text: ex.syntax }),
+            el('span', { text: ex.meaning }),
+          ]);
+          listEl.appendChild(itemEl);
+        }
+        secEl.appendChild(listEl);
+        dialogBody.appendChild(secEl);
+      }
+
+      const actionsRow = el('div', { className: 'wh-help-actions' }, [
+        el('button', {
+          className: 'wh-primary-btn',
+          style: { width: 'auto', padding: '7px 18px' },
+          text: 'Close',
+          attrs: { type: 'button' },
+          on: {
+            click: () => {
+              const handle = activeHelpModal;
+              activeHelpModal = null;
+              handle?.dismiss();
+            },
+          },
+        }),
+      ]);
+      dialogBody.appendChild(actionsRow);
+      helpHandle.root.appendChild(dialogBody);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(`Could not open Search Help: ${msg}`, 'error');
+    }
+  }
+
+  function renderQueryErrorsNotice(): void {
+    if (!queryErrorsContainerEl) return;
+    queryErrorsContainerEl.innerHTML = '';
+    const parsed = parseQuery(searchQuery);
+    if (parsed.ok) {
+      lastValidParsedQuery = parsed;
+      queryErrorsContainerEl.style.display = 'none';
+      return;
+    }
+
+    queryErrorsContainerEl.style.display = 'block';
+    const box = el('div', {
+      className: 'wh-query-errors',
+      attrs: { role: 'alert' },
+    });
+    box.appendChild(el('strong', { text: 'Search syntax problem — fix the query:' }));
+    const ul = el('ul');
+    for (const err of parsed.errors) {
+      ul.appendChild(el('li', { text: err.message }));
+    }
+    box.appendChild(ul);
+    queryErrorsContainerEl.appendChild(box);
+  }
 
   function renderProgressOnly(): void {
     const statusText = activeMode === 'export' ? exportStatusText : importStatusText;
@@ -880,7 +1068,16 @@ export function setup(ctx: SpindleFrontendContext): void {
   }
 
   function getFilteredCharacters(): CharacterSummaryItem[] {
-    const q = searchQuery.trim().toLowerCase();
+    const parsed = parseQuery(searchQuery);
+    if (parsed.ok) {
+      lastValidParsedQuery = parsed;
+    }
+    const effectiveQuery = parsed.ok
+      ? parsed
+      : parsed.groups.length > 0
+        ? parsed
+        : lastValidParsedQuery;
+
     return characters.filter((c) => {
       if (folderFilter === '__UNFILED__') {
         if ((c.folder || '').trim() !== '') return false;
@@ -892,12 +1089,13 @@ export function setup(ctx: SpindleFrontendContext): void {
         if (!Array.isArray(c.tags) || !c.tags.includes(tagFilter)) return false;
       }
 
-      if (q) {
-        const nameMatch = (c.name || '').toLowerCase().includes(q);
-        const creatorMatch = (c.creator || '').toLowerCase().includes(q);
-        const folderMatch = (c.folder || '').toLowerCase().includes(q);
-        const tagMatch = Array.isArray(c.tags) && c.tags.some((t) => t.toLowerCase().includes(q));
-        if (!nameMatch && !creatorMatch && !folderMatch && !tagMatch) return false;
+      if (effectiveQuery.groups.length > 0) {
+        let matchCtx = characterMatchContexts.get(c.id);
+        if (!matchCtx) {
+          matchCtx = buildCharacterMatchContext(c);
+          characterMatchContexts.set(c.id, matchCtx);
+        }
+        if (!evaluateCharacterQuery(effectiveQuery, matchCtx)) return false;
       }
 
       return true;
@@ -953,6 +1151,10 @@ export function setup(ctx: SpindleFrontendContext): void {
       } while (offset < total);
 
       characters = allItems;
+      characterMatchContexts.clear();
+      for (const c of characters) {
+        characterMatchContexts.set(c.id, buildCharacterMatchContext(c));
+      }
       exportPage = 0;
 
       // Clean up any stale selected IDs that no longer exist
@@ -1084,9 +1286,8 @@ export function setup(ctx: SpindleFrontendContext): void {
     );
     const storeWithoutCompression = format !== 'json';
 
-    exportStatusText = `Preparing to export ${selectedChars.length} character${
-      selectedChars.length === 1 ? '' : 's'
-    } (${format.toUpperCase()})...`;
+    exportStatusText = `Preparing to export ${selectedChars.length} character${selectedChars.length === 1 ? '' : 's'
+      } (${format.toUpperCase()})...`;
     exportSubStatusText = '';
     exportProgressPct = 0;
     render();
@@ -1249,16 +1450,14 @@ export function setup(ctx: SpindleFrontendContext): void {
       }
 
       exportProgressPct = 100;
-      exportStatusText = `Exported ${manifestEntries.length} character${
-        manifestEntries.length === 1 ? '' : 's'
-      } (${formatByteSize(lastExportArtifact?.size || 0)})`;
+      exportStatusText = `Exported ${manifestEntries.length} character${manifestEntries.length === 1 ? '' : 's'
+        } (${formatByteSize(lastExportArtifact?.size || 0)})`;
       exportSubStatusText = 'Starting download...';
       renderProgressOnly();
 
       await downloadLastExportArtifact();
       showToast(
-        `Exported ${manifestEntries.length} character${
-          manifestEntries.length === 1 ? '' : 's'
+        `Exported ${manifestEntries.length} character${manifestEntries.length === 1 ? '' : 's'
         } to ${archiveFileName}`,
         'success'
       );
@@ -1336,9 +1535,8 @@ export function setup(ctx: SpindleFrontendContext): void {
     activeImportJobId = null;
     importResultsSummary = null;
     importProgressPct = 0;
-    importStatusText = `Creating import job for ${chosenCandidates.length} character${
-      chosenCandidates.length === 1 ? '' : 's'
-    }...`;
+    importStatusText = `Creating import job for ${chosenCandidates.length} character${chosenCandidates.length === 1 ? '' : 's'
+      }...`;
     importSubStatusText = '';
     render();
 
@@ -1364,7 +1562,7 @@ export function setup(ctx: SpindleFrontendContext): void {
         if (importCancelRequested) {
           await fetch(`/api/v1/characters/import-jobs/${encodeURIComponent(jobId)}/cancel`, {
             method: 'POST',
-          }).catch(() => {});
+          }).catch(() => { });
           throw new Error('Import cancelled by user.');
         }
 
@@ -1419,7 +1617,7 @@ export function setup(ctx: SpindleFrontendContext): void {
         if (importCancelRequested) {
           await fetch(`/api/v1/characters/import-jobs/${encodeURIComponent(jobId)}/cancel`, {
             method: 'POST',
-          }).catch(() => {});
+          }).catch(() => { });
         }
 
         const statusRes = await fetch(
@@ -1432,11 +1630,24 @@ export function setup(ctx: SpindleFrontendContext): void {
         const statusData = (await statusRes.json()) as ImportJobStatusResponse;
         const processed = statusData.processed || 0;
         const total = statusData.total || chosenCandidates.length;
+        const liveImported =
+          statusData.summary?.imported ??
+          (Array.isArray(statusData.results)
+            ? statusData.results.filter((r) => r.success && !r.skipped).length
+            : 0);
+        const liveSkipped =
+          statusData.summary?.skipped ??
+          (Array.isArray(statusData.results)
+            ? statusData.results.filter((r) => Boolean(r.skipped)).length
+            : 0);
+        const liveFailed =
+          statusData.summary?.failed ??
+          (Array.isArray(statusData.results)
+            ? statusData.results.filter((r) => !r.success && !r.skipped).length
+            : 0);
 
         importStatusText = `Importing characters (${processed}/${total})...`;
-        importSubStatusText = `${statusData.succeeded || 0} imported, ${
-          statusData.skipped || 0
-        } skipped, ${statusData.failed || 0} failed`;
+        importSubStatusText = `${liveImported} imported, ${liveSkipped} skipped, ${liveFailed} failed`;
         importProgressPct = 48 + (processed / Math.max(1, total)) * 45;
         renderProgressOnly();
 
@@ -1456,9 +1667,11 @@ export function setup(ctx: SpindleFrontendContext): void {
       let foldersRestoredCount = 0;
       if (preferences.restoreFolders && finalStatus && Array.isArray(finalStatus.results)) {
         const folderToCharIds = new Map<string, string[]>();
-        for (const itemResult of finalStatus.results) {
-          if (itemResult.status === 'imported' && itemResult.character?.id) {
-            const candidate = chosenCandidates[itemResult.index];
+        for (let idx = 0; idx < finalStatus.results.length; idx += 1) {
+          const itemResult = finalStatus.results[idx];
+          const isImported = Boolean(itemResult.success && !itemResult.skipped);
+          if (isImported && itemResult.character?.id) {
+            const candidate = chosenCandidates[idx];
             const targetFolder = (candidate?.folder || '').trim();
             if (targetFolder) {
               const list = folderToCharIds.get(targetFolder) || [];
@@ -1499,28 +1712,42 @@ export function setup(ctx: SpindleFrontendContext): void {
         detail?: string;
       }> = [];
 
+      let computedImported = 0;
+      let computedSkipped = 0;
+      let computedFailed = 0;
+
       if (finalStatus && Array.isArray(finalStatus.results)) {
-        for (const r of finalStatus.results) {
-          const candidate = chosenCandidates[r.index];
+        for (let idx = 0; idx < finalStatus.results.length; idx += 1) {
+          const r = finalStatus.results[idx];
+          const candidate = chosenCandidates[idx];
+          const itemStatus: 'imported' | 'skipped' | 'error' = r.skipped
+            ? 'skipped'
+            : r.success
+              ? 'imported'
+              : 'error';
+          if (itemStatus === 'imported') computedImported += 1;
+          else if (itemStatus === 'skipped') computedSkipped += 1;
+          else computedFailed += 1;
+
           const displayName =
-            r.character?.name || candidate?.baseName || r.filename || `Entry #${r.index + 1}`;
+            r.character?.name || candidate?.baseName || r.filename || `Entry #${idx + 1}`;
           logItems.push({
             name: displayName,
-            status: r.status,
+            status: itemStatus,
             detail:
-              r.status === 'imported'
+              itemStatus === 'imported'
                 ? candidate?.folder && preferences.restoreFolders
-                  ? `Folder: ${candidate.folder}`
+                  ? `Imported (Folder: ${candidate.folder})`
                   : 'Imported'
-                : r.error || (r.status === 'skipped' ? 'Duplicate skipped' : 'Failed'),
+                : r.error || (itemStatus === 'skipped' ? 'Duplicate skipped' : 'Failed'),
           });
         }
       }
 
       importResultsSummary = {
-        imported: finalStatus?.succeeded || 0,
-        skipped: finalStatus?.skipped || 0,
-        failed: finalStatus?.failed || 0,
+        imported: finalStatus?.summary?.imported ?? computedImported,
+        skipped: finalStatus?.summary?.skipped ?? computedSkipped,
+        failed: finalStatus?.summary?.failed ?? computedFailed,
         foldersRestored: foldersRestoredCount,
         items: logItems,
       };
@@ -1532,7 +1759,7 @@ export function setup(ctx: SpindleFrontendContext): void {
       );
 
       // Refresh character library list so newly imported characters show up immediately in Export tab
-      loadCharacterLibrary().catch(() => {});
+      loadCharacterLibrary().catch(() => { });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       showToast(`Import failed: ${msg}`, 'error');
@@ -1558,9 +1785,8 @@ export function setup(ctx: SpindleFrontendContext): void {
       exportButtonEl.disabled = isExporting || selectedCharIds.size === 0;
       exportButtonEl.textContent = isExporting
         ? 'Exporting...'
-        : `Export ${selectedCharIds.size.toLocaleString()} Character${
-            selectedCharIds.size === 1 ? '' : 's'
-          } as .ZIP (${preferences.exportFormat.toUpperCase()})`;
+        : `Export ${selectedCharIds.size.toLocaleString()} Character${selectedCharIds.size === 1 ? '' : 's'
+        } as .ZIP (${preferences.exportFormat.toUpperCase()})`;
     }
     if (!charListContainerEl) return;
 
@@ -1675,9 +1901,8 @@ export function setup(ctx: SpindleFrontendContext): void {
         }
         if (exportButtonEl) {
           exportButtonEl.disabled = isExporting || selectedCharIds.size === 0;
-          exportButtonEl.textContent = `Export ${selectedCharIds.size.toLocaleString()} Character${
-            selectedCharIds.size === 1 ? '' : 's'
-          } as .ZIP (${preferences.exportFormat.toUpperCase()})`;
+          exportButtonEl.textContent = `Export ${selectedCharIds.size.toLocaleString()} Character${selectedCharIds.size === 1 ? '' : 's'
+            } as .ZIP (${preferences.exportFormat.toUpperCase()})`;
         }
       };
 
@@ -1758,25 +1983,25 @@ export function setup(ctx: SpindleFrontendContext): void {
       ext: string;
       desc: string;
     }> = [
-      {
-        id: 'charx',
-        title: 'CHARX',
-        ext: '.charx',
-        desc: 'Full bundle: card, alt avatars, gallery, expressions, world books & regex',
-      },
-      {
-        id: 'png',
-        title: 'PNG Card',
-        ext: '.png',
-        desc: 'Avatar PNG embedded with CCSv3 metadata & attached world books',
-      },
-      {
-        id: 'json',
-        title: 'JSON Card',
-        ext: '.json',
-        desc: 'Lightweight CCSv3 JSON character definition & character_book',
-      },
-    ];
+        {
+          id: 'charx',
+          title: 'CHARX',
+          ext: '.charx',
+          desc: 'Full bundle: card, alt avatars, gallery, expressions, world books & regex',
+        },
+        {
+          id: 'png',
+          title: 'PNG Card',
+          ext: '.png',
+          desc: 'Avatar PNG embedded with CCSv3 metadata & attached world books',
+        },
+        {
+          id: 'json',
+          title: 'JSON Card',
+          ext: '.json',
+          desc: 'Lightweight CCSv3 JSON character definition & character_book',
+        },
+      ];
 
     const formatGrid = el('div', { className: 'wh-format-grid' });
     for (const fmt of formats) {
@@ -1878,16 +2103,41 @@ export function setup(ctx: SpindleFrontendContext): void {
       className: 'wh-input',
       attrs: {
         type: 'search',
-        placeholder: 'Search by name, creator, folder, or tag...',
+        placeholder: 'Search names, or use T:tag F:folder A:author C:name (comma = OR, - = exclude)...',
         value: searchQuery,
       },
     }) as HTMLInputElement;
     searchInput.addEventListener('input', () => {
       searchQuery = searchInput.value;
       exportPage = 0;
+      renderQueryErrorsNotice();
       updateCharacterListSelectionUI();
     });
-    filterBar.appendChild(searchInput);
+
+    const syntaxHelpBtn = el('button', {
+      className: 'wh-mini-btn',
+      style: { padding: '7px 10px', whiteSpace: 'nowrap' },
+      text: 'Search Syntax Help',
+      attrs: {
+        type: 'button',
+        title: 'Show search syntax reference (T:, C:, F:, A:, AND/OR, negation)',
+      },
+      on: {
+        click: () => {
+          openSearchHelpModal();
+        },
+      },
+    });
+
+    const searchRow = el('div', { className: 'wh-search-row' }, [
+      searchInput,
+      syntaxHelpBtn,
+    ]);
+    filterBar.appendChild(searchRow);
+
+    queryErrorsContainerEl = el('div', { style: { display: 'none' } });
+    filterBar.appendChild(queryErrorsContainerEl);
+    renderQueryErrorsNotice();
 
     const filterRow = el('div', { className: 'wh-filter-row' });
 
@@ -2034,9 +2284,8 @@ export function setup(ctx: SpindleFrontendContext): void {
     } else {
       exportButtonEl = el('button', {
         className: 'wh-primary-btn',
-        text: `Export ${selectedCharIds.size} Character${
-          selectedCharIds.size === 1 ? '' : 's'
-        } as .ZIP (${preferences.exportFormat.toUpperCase()})`,
+        text: `Export ${selectedCharIds.size} Character${selectedCharIds.size === 1 ? '' : 's'
+          } as .ZIP (${preferences.exportFormat.toUpperCase()})`,
         attrs: { type: 'button' },
         on: {
           click: () => {
@@ -2063,9 +2312,8 @@ export function setup(ctx: SpindleFrontendContext): void {
               }),
               el('span', {
                 className: 'wh-panel-subtitle',
-                text: `${lastExportArtifact.count} character${
-                  lastExportArtifact.count === 1 ? '' : 's'
-                } • ${formatByteSize(lastExportArtifact.size)}`,
+                text: `${lastExportArtifact.count} character${lastExportArtifact.count === 1 ? '' : 's'
+                  } • ${formatByteSize(lastExportArtifact.size)}`,
               }),
             ]),
             el('button', {
@@ -2158,9 +2406,8 @@ export function setup(ctx: SpindleFrontendContext): void {
         el('div', {
           className: 'wh-panel-subtitle',
           text: inspectedZip
-            ? `Found ${inspectedZip.entries.length} character card${
-                inspectedZip.entries.length === 1 ? '' : 's'
-              }${inspectedZip.manifest ? ' • Warehouse Manifest detected' : ''}`
+            ? `Found ${inspectedZip.entries.length} character card${inspectedZip.entries.length === 1 ? '' : 's'
+            }${inspectedZip.manifest ? ' • Warehouse Manifest detected' : ''}`
             : 'Reads ZIP & ZIP64 archives directly without loading the entire file into RAM',
         }),
       ]
@@ -2432,7 +2679,7 @@ export function setup(ctx: SpindleFrontendContext): void {
                   fetch(
                     `/api/v1/characters/import-jobs/${encodeURIComponent(activeImportJobId)}/cancel`,
                     { method: 'POST' }
-                  ).catch(() => {});
+                  ).catch(() => { });
                 }
               },
             },
@@ -2441,9 +2688,8 @@ export function setup(ctx: SpindleFrontendContext): void {
       } else {
         const importBtn = el('button', {
           className: 'wh-primary-btn',
-          text: `Import ${selectedZipEntryPaths.size} Character${
-            selectedZipEntryPaths.size === 1 ? '' : 's'
-          } into Lumiverse`,
+          text: `Import ${selectedZipEntryPaths.size} Character${selectedZipEntryPaths.size === 1 ? '' : 's'
+            } into Lumiverse`,
           attrs: { type: 'button' },
           on: {
             click: () => {
@@ -2466,11 +2712,10 @@ export function setup(ctx: SpindleFrontendContext): void {
           el('span', { className: 'wh-panel-title', text: 'Import Summary' }),
           el('span', {
             className: 'wh-panel-subtitle',
-            text: `${importResultsSummary.imported} imported • ${importResultsSummary.skipped} skipped • ${importResultsSummary.failed} failed${
-              importResultsSummary.foldersRestored > 0
-                ? ` • ${importResultsSummary.foldersRestored} folders restored`
-                : ''
-            }`,
+            text: `${importResultsSummary.imported} imported • ${importResultsSummary.skipped} skipped • ${importResultsSummary.failed} failed${importResultsSummary.foldersRestored > 0
+              ? ` • ${importResultsSummary.foldersRestored} folders restored`
+              : ''
+              }`,
           }),
         ])
       );
@@ -2515,6 +2760,7 @@ export function setup(ctx: SpindleFrontendContext): void {
     charListPagerEl = null;
     selectionSummaryEl = null;
     exportButtonEl = null;
+    queryErrorsContainerEl = null;
 
     const activeRoot = activeModal ? modalRoot : drawerRoot;
     drawerRoot.innerHTML = '';
@@ -2522,8 +2768,7 @@ export function setup(ctx: SpindleFrontendContext): void {
 
     if (activeModal) {
       activeModal.setTitle(
-        `Warehouse — Batch Character ${
-          activeMode === 'export' ? 'Export' : 'Import'
+        `Warehouse — Batch Character ${activeMode === 'export' ? 'Export' : 'Import'
         } (${characters.length.toLocaleString()} cards)`
       );
 

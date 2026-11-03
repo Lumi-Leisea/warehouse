@@ -1,3 +1,283 @@
+// src/search.ts
+function isWhitespace(ch) {
+  return ch === " " || ch === "\t" || ch === `
+` || ch === "\r";
+}
+function scanTokens(input, groupStart, groupEnd) {
+  const out = [];
+  let i = groupStart;
+  while (i < groupEnd) {
+    while (i < groupEnd && isWhitespace(input[i]))
+      i++;
+    if (i >= groupEnd)
+      break;
+    const start = i;
+    let inQuotes = false;
+    while (i < groupEnd) {
+      const ch = input[i];
+      if (ch === '"') {
+        inQuotes = !inQuotes;
+        i++;
+        continue;
+      }
+      if (!inQuotes && isWhitespace(ch)) {
+        break;
+      }
+      i++;
+    }
+    out.push({ text: input.slice(start, i), offset: start });
+  }
+  return out;
+}
+function stripOuterQuotes(val) {
+  const trimmed = val.trim();
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+var PREFIX_MAP = {
+  t: "tag",
+  c: "char",
+  f: "folder",
+  a: "author"
+};
+var PREFIX_EXAMPLE_MAP = {
+  T: "T:Elf",
+  C: "C:John",
+  F: "F:Fantasy",
+  A: "A:Eleisea"
+};
+function parseSingleToken(token) {
+  const { text, offset } = token;
+  let cursor = 0;
+  let negated = false;
+  if (text.startsWith("-")) {
+    negated = true;
+    cursor = 1;
+  }
+  const body = text.slice(cursor);
+  if (body.length === 0) {
+    return {
+      offset,
+      length: text.length,
+      message: "Dangling `-` — put a term after it, like `-T:Dark` or `-F:Archive`."
+    };
+  }
+  if (body.length >= 2 && body[1] === ":") {
+    const prefixChar = body[0];
+    const mappedField = PREFIX_MAP[prefixChar.toLowerCase()];
+    if (mappedField) {
+      const rawValue = stripOuterQuotes(body.slice(2));
+      if (rawValue.length === 0) {
+        const canonical = prefixChar.toUpperCase();
+        const example = PREFIX_EXAMPLE_MAP[canonical] || `${canonical}:value`;
+        return {
+          offset,
+          length: text.length,
+          message: `\`${canonical}:\` requires a value — try \`${example}\`.`
+        };
+      }
+      return {
+        field: mappedField,
+        value: rawValue.toLowerCase(),
+        negated
+      };
+    }
+  }
+  const cleanedBare = stripOuterQuotes(body);
+  if (cleanedBare.length === 0) {
+    return {
+      offset,
+      length: text.length,
+      message: "Empty quoted search term — enter text inside quotes."
+    };
+  }
+  return {
+    field: "name",
+    value: cleanedBare.toLowerCase(),
+    negated
+  };
+}
+function splitGroupsRespectingQuotes(input) {
+  const spans = [];
+  let groupStart = 0;
+  let inQuotes = false;
+  for (let i = 0;i <= input.length; i++) {
+    const ch = i < input.length ? input[i] : ",";
+    if (ch === '"' && i < input.length) {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (ch === "," && !inQuotes) {
+      spans.push({ start: groupStart, end: i });
+      groupStart = i + 1;
+    }
+  }
+  return spans;
+}
+function parseQuery(rawInput) {
+  const raw = typeof rawInput === "string" ? rawInput : "";
+  const groups = [];
+  const errors = [];
+  const groupSpans = splitGroupsRespectingQuotes(raw);
+  for (const span of groupSpans) {
+    const tokens = scanTokens(raw, span.start, span.end);
+    if (tokens.length === 0)
+      continue;
+    const terms = [];
+    for (const tok of tokens) {
+      const parsed = parseSingleToken(tok);
+      if ("message" in parsed) {
+        errors.push(parsed);
+      } else {
+        terms.push(parsed);
+      }
+    }
+    if (terms.length > 0) {
+      groups.push({ terms });
+    }
+  }
+  const ok = errors.length === 0;
+  const isEmpty = ok && groups.length === 0;
+  return { raw, groups, errors, ok, isEmpty };
+}
+function buildCharacterMatchContext(char) {
+  const tagKeys = new Set;
+  if (Array.isArray(char.tags)) {
+    for (const t of char.tags) {
+      if (typeof t === "string") {
+        const cleaned = t.trim().toLowerCase();
+        if (cleaned)
+          tagKeys.add(cleaned);
+      }
+    }
+  }
+  return {
+    nameLower: (char.name || "").toLowerCase(),
+    creatorLower: (char.creator || "").toLowerCase(),
+    folderLower: (char.folder || "").trim().toLowerCase(),
+    tagKeys
+  };
+}
+function evalPositiveTerm(term, ctx) {
+  switch (term.field) {
+    case "name":
+    case "char":
+      return ctx.nameLower.includes(term.value);
+    case "tag":
+      return ctx.tagKeys.has(term.value);
+    case "folder":
+      if (term.value === "unfiled" || term.value === "none") {
+        return ctx.folderLower === "" || ctx.folderLower.includes(term.value);
+      }
+      return ctx.folderLower.includes(term.value);
+    case "author":
+      return ctx.creatorLower.includes(term.value);
+  }
+}
+function evalGroup(group, ctx) {
+  for (const term of group.terms) {
+    const hit = evalPositiveTerm(term, ctx);
+    if (term.negated ? hit : !hit)
+      return false;
+  }
+  return true;
+}
+function evaluateCharacterQuery(query, ctx) {
+  if (query.groups.length === 0)
+    return true;
+  for (const group of query.groups) {
+    if (evalGroup(group, ctx))
+      return true;
+  }
+  return false;
+}
+function getWarehouseSearchHelpSections() {
+  return [
+    {
+      heading: "Prefixes",
+      examples: [
+        {
+          syntax: "Elf",
+          meaning: "No prefix searches character names, matching any part of the name."
+        },
+        {
+          syntax: "T:Elf",
+          meaning: "Tag name search. Matches the whole tag name, so T:Elf does not match a tag called ElfKing."
+        },
+        {
+          syntax: "C:John",
+          meaning: "Character name search (explicit prefix). Matches any part of the character name."
+        },
+        {
+          syntax: "F:Fantasy",
+          meaning: "Folder search. Matches characters in a folder matching Fantasy (use F:unfiled for characters without a folder)."
+        },
+        {
+          syntax: "A:Eleisea",
+          meaning: "Author / Creator search. Matches any part of the character creator field."
+        }
+      ]
+    },
+    {
+      heading: "Combining terms",
+      examples: [
+        {
+          syntax: "T:Elf T:Magic",
+          meaning: "Spaces mean AND — the character needs both tags."
+        },
+        {
+          syntax: "F:Fantasy A:Eleisea",
+          meaning: "Combines prefixes with AND — in folder Fantasy AND created by Eleisea."
+        },
+        {
+          syntax: "T:Elf, T:Magic",
+          meaning: "Commas mean OR — the character needs either tag."
+        },
+        {
+          syntax: "C:John, F:Sci-Fi T:Mecha",
+          meaning: "Mixes both: this reads as (C:John) OR (F:Sci-Fi AND T:Mecha)."
+        }
+      ]
+    },
+    {
+      heading: "Excluding results",
+      examples: [
+        {
+          syntax: "-T:Dark",
+          meaning: "Put - in front of a term to exclude matches. Negation applies to the whole term."
+        },
+        {
+          syntax: "F:Fantasy -A:Anon",
+          meaning: "Characters in the Fantasy folder whose creator does not match Anon."
+        },
+        {
+          syntax: "T:Elf -T:Dark",
+          meaning: "Characters tagged Elf but not Dark."
+        }
+      ]
+    },
+    {
+      heading: "Good to know",
+      examples: [
+        {
+          syntax: "elf",
+          meaning: "Matching ignores case for both prefixes and values, so T:elf, f:FANTASY, and a:eleisea all work."
+        },
+        {
+          syntax: 'F:"My Folder"',
+          meaning: 'Wrap values containing spaces in double quotes, such as F:"My Folder", A:"Jane Doe", or T:"Slice of Life".'
+        },
+        {
+          syntax: "(empty search box)",
+          meaning: "A blank search returns every character rather than no results."
+        }
+      ]
+    }
+  ];
+}
+
 // src/types.ts
 var DEFAULT_PREFERENCES = {
   exportFormat: "charx",
@@ -473,12 +753,7 @@ function sanitizeFilenameComponent(input, fallback = "character") {
 }
 
 // src/frontend.ts
-var WAREHOUSE_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/>
-  <path d="m3.3 7 8.7 5 8.7-5"/>
-  <path d="M12 22V12"/>
-  <path d="m7.5 4.27 9 5.15"/>
-</svg>`;
+var WAREHOUSE_ICON_SVG = `<svg viewBox="0 0 24 24"><path fill="currentColor" d="M5.75 2.75h12.5V2h1.5v20h-1.5v-1.5H5.75V22h-1.5V2h1.5ZM15.926 19h2.324v-3.917H5.75V19h1.717v-2.52c0-.119-.011-.22.059-.324a.35.35 0 0 1 .257-.154c.044-.005.089-.002.134-.002h2.1c.045 0 .09-.003.134.002c.11.01.21.074.266.168c.062.103.05.205.05.32V19h2.459v-2.52c0-.119-.011-.22.059-.324a.35.35 0 0 1 .257-.154c.044-.005.09-.002.134-.002h2.1c.045 0 .09-.003.134.002c.11.01.21.074.266.168c.062.103.05.205.05.32Zm-1.036-5.417h3.36V9.667H5.75v3.916h2.14v-2.667l.005-.042a.4.4 0 0 1 .036-.106a.35.35 0 0 1 .241-.178c.061-.012.162-.007.228-.007h2.02c.132 0 .232-.01.342.08a.35.35 0 0 1 .126.236c.006.055.002.119.002.174v2.51h1v-2.51c0-.114-.012-.217.05-.32a.35.35 0 0 1 .266-.168c.044-.004.09-.002.134-.002h2.1c.045 0 .09-.002.134.002c.104.01.199.068.257.154c.07.105.059.205.059.324Zm1.64-5.416h1.72V4.25H5.75v3.917h7.78V5.656c0-.114-.012-.216.05-.319a.35.35 0 0 1 .266-.169c.044-.004.089-.001.134-.001h2.1c.045 0 .09-.003.134.001a.36.36 0 0 1 .257.154c.07.105.059.205.059.324Z"/></svg>`;
 var WAREHOUSE_STYLES = `
 .wh-root {
   display: flex;
@@ -1028,24 +1303,119 @@ var WAREHOUSE_STYLES = `
 .wh-status-err {
   color: #f87171;
 }
+
+.wh-search-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.wh-search-row .wh-input {
+  flex: 1;
+}
+
+.wh-query-errors {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(250, 204, 21, 0.35);
+  border-radius: 8px;
+  background: rgba(250, 204, 21, 0.08);
+  color: var(--lumiverse-text-muted, #a1a1aa);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.wh-query-errors strong {
+  color: #facc15;
+  font-weight: 600;
+}
+
+.wh-query-errors ul {
+  margin: 5px 0 0;
+  padding-left: 18px;
+  list-style: disc;
+}
+
+.wh-help-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--lumiverse-text, #f4f4f6);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.wh-help-intro {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--lumiverse-text-muted, #a1a1aa);
+}
+
+.wh-help-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wh-help-heading {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--lumiverse-text-muted, #a1a1aa);
+}
+
+.wh-help-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wh-help-item {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--lumiverse-text-muted, #a1a1aa);
+}
+
+.wh-help-code {
+  display: inline-block;
+  padding: 1px 6px;
+  margin-right: 6px;
+  border-radius: 5px;
+  background: rgba(56, 189, 248, 0.14);
+  color: #38bdf8;
+  font-family: var(--lumiverse-font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.wh-help-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 6px;
+}
 `;
 function setup(ctx) {
   ctx.dom.addStyle(WAREHOUSE_STYLES);
   let activeMode = "export";
   let preferences = { ...DEFAULT_PREFERENCES };
   let characters = [];
+  const characterMatchContexts = new Map;
   let availableTags = [];
   let isLoadingLibrary = false;
   let libraryLoadedCount = 0;
   let libraryTotalCount = 0;
   let libraryError = null;
   let searchQuery = "";
+  let lastValidParsedQuery = parseQuery("");
   let folderFilter = "__ALL__";
   let tagFilter = "__ALL__";
   let exportPage = 0;
   let importPage = 0;
   const selectedCharIds = new Set;
   let activeModal = null;
+  let activeHelpModal = null;
   let isExporting = false;
   let exportCancelRequested = false;
   let exportAbortController = null;
@@ -1240,6 +1610,92 @@ function setup(ctx) {
   let charListPagerEl = null;
   let selectionSummaryEl = null;
   let exportButtonEl = null;
+  let queryErrorsContainerEl = null;
+  function openSearchHelpModal() {
+    if (activeHelpModal) {
+      return;
+    }
+    try {
+      const helpHandle = ctx.ui.showModal({
+        title: "Search help — Warehouse",
+        width: 580,
+        maxHeight: 760
+      });
+      activeHelpModal = helpHandle;
+      helpHandle.onDismiss(() => {
+        if (activeHelpModal === helpHandle) {
+          activeHelpModal = null;
+        }
+      });
+      const dialogBody = el("div", { className: "wh-help-dialog" }, [
+        el("p", {
+          className: "wh-help-intro",
+          text: "Use LumiTag-style search prefixes to filter characters by name, tag, folder, or author/creator."
+        })
+      ]);
+      for (const section of getWarehouseSearchHelpSections()) {
+        const secEl = el("section", { className: "wh-help-section" }, [
+          el("h4", { className: "wh-help-heading", text: section.heading })
+        ]);
+        if (section.intro) {
+          secEl.appendChild(el("p", { className: "wh-help-intro", text: section.intro }));
+        }
+        const listEl = el("div", { className: "wh-help-list" });
+        for (const ex of section.examples) {
+          const itemEl = el("div", { className: "wh-help-item" }, [
+            el("code", { className: "wh-help-code", text: ex.syntax }),
+            el("span", { text: ex.meaning })
+          ]);
+          listEl.appendChild(itemEl);
+        }
+        secEl.appendChild(listEl);
+        dialogBody.appendChild(secEl);
+      }
+      const actionsRow = el("div", { className: "wh-help-actions" }, [
+        el("button", {
+          className: "wh-primary-btn",
+          style: { width: "auto", padding: "7px 18px" },
+          text: "Close",
+          attrs: { type: "button" },
+          on: {
+            click: () => {
+              const handle = activeHelpModal;
+              activeHelpModal = null;
+              handle?.dismiss();
+            }
+          }
+        })
+      ]);
+      dialogBody.appendChild(actionsRow);
+      helpHandle.root.appendChild(dialogBody);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(`Could not open Search Help: ${msg}`, "error");
+    }
+  }
+  function renderQueryErrorsNotice() {
+    if (!queryErrorsContainerEl)
+      return;
+    queryErrorsContainerEl.innerHTML = "";
+    const parsed = parseQuery(searchQuery);
+    if (parsed.ok) {
+      lastValidParsedQuery = parsed;
+      queryErrorsContainerEl.style.display = "none";
+      return;
+    }
+    queryErrorsContainerEl.style.display = "block";
+    const box = el("div", {
+      className: "wh-query-errors",
+      attrs: { role: "alert" }
+    });
+    box.appendChild(el("strong", { text: "Search syntax problem — fix the query:" }));
+    const ul = el("ul");
+    for (const err of parsed.errors) {
+      ul.appendChild(el("li", { text: err.message }));
+    }
+    box.appendChild(ul);
+    queryErrorsContainerEl.appendChild(box);
+  }
   function renderProgressOnly() {
     const statusText = activeMode === "export" ? exportStatusText : importStatusText;
     const subText = activeMode === "export" ? exportSubStatusText : importSubStatusText;
@@ -1263,7 +1719,11 @@ function setup(ctx) {
     return Array.from(folders).sort((a, b) => a.localeCompare(b));
   }
   function getFilteredCharacters() {
-    const q = searchQuery.trim().toLowerCase();
+    const parsed = parseQuery(searchQuery);
+    if (parsed.ok) {
+      lastValidParsedQuery = parsed;
+    }
+    const effectiveQuery = parsed.ok ? parsed : parsed.groups.length > 0 ? parsed : lastValidParsedQuery;
     return characters.filter((c) => {
       if (folderFilter === "__UNFILED__") {
         if ((c.folder || "").trim() !== "")
@@ -1276,12 +1736,13 @@ function setup(ctx) {
         if (!Array.isArray(c.tags) || !c.tags.includes(tagFilter))
           return false;
       }
-      if (q) {
-        const nameMatch = (c.name || "").toLowerCase().includes(q);
-        const creatorMatch = (c.creator || "").toLowerCase().includes(q);
-        const folderMatch = (c.folder || "").toLowerCase().includes(q);
-        const tagMatch = Array.isArray(c.tags) && c.tags.some((t) => t.toLowerCase().includes(q));
-        if (!nameMatch && !creatorMatch && !folderMatch && !tagMatch)
+      if (effectiveQuery.groups.length > 0) {
+        let matchCtx = characterMatchContexts.get(c.id);
+        if (!matchCtx) {
+          matchCtx = buildCharacterMatchContext(c);
+          characterMatchContexts.set(c.id, matchCtx);
+        }
+        if (!evaluateCharacterQuery(effectiveQuery, matchCtx))
           return false;
       }
       return true;
@@ -1323,6 +1784,10 @@ function setup(ctx) {
           break;
       } while (offset < total);
       characters = allItems;
+      characterMatchContexts.clear();
+      for (const c of characters) {
+        characterMatchContexts.set(c.id, buildCharacterMatchContext(c));
+      }
       exportPage = 0;
       const validIds = new Set(characters.map((c) => c.id));
       for (const id of Array.from(selectedCharIds)) {
@@ -1676,8 +2141,11 @@ function setup(ctx) {
         const statusData = await statusRes.json();
         const processed = statusData.processed || 0;
         const total = statusData.total || chosenCandidates.length;
+        const liveImported = statusData.summary?.imported ?? (Array.isArray(statusData.results) ? statusData.results.filter((r) => r.success && !r.skipped).length : 0);
+        const liveSkipped = statusData.summary?.skipped ?? (Array.isArray(statusData.results) ? statusData.results.filter((r) => Boolean(r.skipped)).length : 0);
+        const liveFailed = statusData.summary?.failed ?? (Array.isArray(statusData.results) ? statusData.results.filter((r) => !r.success && !r.skipped).length : 0);
         importStatusText = `Importing characters (${processed}/${total})...`;
-        importSubStatusText = `${statusData.succeeded || 0} imported, ${statusData.skipped || 0} skipped, ${statusData.failed || 0} failed`;
+        importSubStatusText = `${liveImported} imported, ${liveSkipped} skipped, ${liveFailed} failed`;
         importProgressPct = 48 + processed / Math.max(1, total) * 45;
         renderProgressOnly();
         if (statusData.status === "complete" || statusData.status === "cancelled" || statusData.status === "error") {
@@ -1689,9 +2157,11 @@ function setup(ctx) {
       let foldersRestoredCount = 0;
       if (preferences.restoreFolders && finalStatus && Array.isArray(finalStatus.results)) {
         const folderToCharIds = new Map;
-        for (const itemResult of finalStatus.results) {
-          if (itemResult.status === "imported" && itemResult.character?.id) {
-            const candidate = chosenCandidates[itemResult.index];
+        for (let idx = 0;idx < finalStatus.results.length; idx += 1) {
+          const itemResult = finalStatus.results[idx];
+          const isImported = Boolean(itemResult.success && !itemResult.skipped);
+          if (isImported && itemResult.character?.id) {
+            const candidate = chosenCandidates[idx];
             const targetFolder = (candidate?.folder || "").trim();
             if (targetFolder) {
               const list = folderToCharIds.get(targetFolder) || [];
@@ -1722,21 +2192,32 @@ function setup(ctx) {
         }
       }
       const logItems = [];
+      let computedImported = 0;
+      let computedSkipped = 0;
+      let computedFailed = 0;
       if (finalStatus && Array.isArray(finalStatus.results)) {
-        for (const r of finalStatus.results) {
-          const candidate = chosenCandidates[r.index];
-          const displayName = r.character?.name || candidate?.baseName || r.filename || `Entry #${r.index + 1}`;
+        for (let idx = 0;idx < finalStatus.results.length; idx += 1) {
+          const r = finalStatus.results[idx];
+          const candidate = chosenCandidates[idx];
+          const itemStatus = r.skipped ? "skipped" : r.success ? "imported" : "error";
+          if (itemStatus === "imported")
+            computedImported += 1;
+          else if (itemStatus === "skipped")
+            computedSkipped += 1;
+          else
+            computedFailed += 1;
+          const displayName = r.character?.name || candidate?.baseName || r.filename || `Entry #${idx + 1}`;
           logItems.push({
             name: displayName,
-            status: r.status,
-            detail: r.status === "imported" ? candidate?.folder && preferences.restoreFolders ? `Folder: ${candidate.folder}` : "Imported" : r.error || (r.status === "skipped" ? "Duplicate skipped" : "Failed")
+            status: itemStatus,
+            detail: itemStatus === "imported" ? candidate?.folder && preferences.restoreFolders ? `Imported (Folder: ${candidate.folder})` : "Imported" : r.error || (itemStatus === "skipped" ? "Duplicate skipped" : "Failed")
           });
         }
       }
       importResultsSummary = {
-        imported: finalStatus?.succeeded || 0,
-        skipped: finalStatus?.skipped || 0,
-        failed: finalStatus?.failed || 0,
+        imported: finalStatus?.summary?.imported ?? computedImported,
+        skipped: finalStatus?.summary?.skipped ?? computedSkipped,
+        failed: finalStatus?.summary?.failed ?? computedFailed,
         foldersRestored: foldersRestoredCount,
         items: logItems
       };
@@ -1994,16 +2475,38 @@ function setup(ctx) {
       className: "wh-input",
       attrs: {
         type: "search",
-        placeholder: "Search by name, creator, folder, or tag...",
+        placeholder: "Search names, or use T:tag F:folder A:author C:name (comma = OR, - = exclude)...",
         value: searchQuery
       }
     });
     searchInput.addEventListener("input", () => {
       searchQuery = searchInput.value;
       exportPage = 0;
+      renderQueryErrorsNotice();
       updateCharacterListSelectionUI();
     });
-    filterBar.appendChild(searchInput);
+    const syntaxHelpBtn = el("button", {
+      className: "wh-mini-btn",
+      style: { padding: "7px 10px", whiteSpace: "nowrap" },
+      text: "Search Syntax Help",
+      attrs: {
+        type: "button",
+        title: "Show search syntax reference (T:, C:, F:, A:, AND/OR, negation)"
+      },
+      on: {
+        click: () => {
+          openSearchHelpModal();
+        }
+      }
+    });
+    const searchRow = el("div", { className: "wh-search-row" }, [
+      searchInput,
+      syntaxHelpBtn
+    ]);
+    filterBar.appendChild(searchRow);
+    queryErrorsContainerEl = el("div", { style: { display: "none" } });
+    filterBar.appendChild(queryErrorsContainerEl);
+    renderQueryErrorsNotice();
     const filterRow = el("div", { className: "wh-filter-row" });
     const folderSelect = el("select", { className: "wh-select" });
     folderSelect.appendChild(el("option", { attrs: { value: "__ALL__" }, text: "All Folders" }));
@@ -2512,6 +3015,7 @@ function setup(ctx) {
     charListPagerEl = null;
     selectionSummaryEl = null;
     exportButtonEl = null;
+    queryErrorsContainerEl = null;
     const activeRoot = activeModal ? modalRoot : drawerRoot;
     drawerRoot.innerHTML = "";
     modalRoot.innerHTML = "";
