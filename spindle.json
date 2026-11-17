@@ -5,7 +5,7 @@
   "author": "Eleisea",
   "github": "https://github.com/Lumi-Leisea/warehouse",
   "homepage": "https://github.com/Lumi-Leisea/warehouse",
-  "description": "Batch export characters in JSON, PNG, or CHARX format into a .zip archive, and batch re-import zipped character archives back into Lumiverse.",
+  "description": "Batch export characters in JSON, PNG, or CHARX format into a .zip archive, and batch import zipped character archives into Lumiverse.",
   "permissions": [
     "characters"
   ],
